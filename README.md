@@ -5,7 +5,7 @@ newcomer scans it and asks for permissions, both screens show the same fingerpri
 approves all, some, or none of the request. Crate `erisauth`.
 
 ```toml
-erisauth = { git = "https://github.com/Eriskii/ErisAuth", tag = "v0.1.1" }
+erisauth = { git = "https://github.com/Eriskii/ErisAuth", tag = "v0.2.0" }
 ```
 
 | Module       | What it holds                                                                                 |

@@ -17,7 +17,7 @@ use std::sync::Mutex;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
@@ -30,7 +30,7 @@ use crate::{now, permission};
 pub const MAX_CLIENT_LEN: usize = 128;
 
 /// Where a session stands.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Status {
     /// Waiting for a newcomer to redeem the code.
@@ -42,12 +42,14 @@ pub enum Status {
         granted: Vec<String>,
     },
     Denied,
-    /// The redeemer has its answer. Collecting again returns it again.
-    Collected,
+    /// The redeemer has collected these grants. Collecting again returns them again.
+    Collected {
+        granted: Vec<String>,
+    },
 }
 
 /// One pairing session as a host's UI sees it. The code is never part of it.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: Uuid,
     #[serde(flatten)]
@@ -57,8 +59,6 @@ pub struct Session {
     /// The redeemer's name for itself. Shown to the person, trusted for nothing.
     pub client: Option<String>,
     pub requested: Vec<String>,
-    /// What was approved; empty until then.
-    pub granted: Vec<String>,
     pub identity: Option<Identity>,
     /// The comparison code both screens show once the code is redeemed.
     pub fingerprint: Option<String>,
@@ -110,7 +110,6 @@ impl Pairings {
             expires: now().saturating_add(ttl_secs),
             client: None,
             requested: Vec::new(),
-            granted: Vec::new(),
             identity: None,
             fingerprint: None,
         };
@@ -189,7 +188,6 @@ impl Pairings {
         if !permission::encloses(&session.requested, &granted) {
             return Err(Error::Forbidden { permission: granted.join(",") });
         }
-        session.granted = granted.clone();
         session.status = Status::Approved { granted };
         let out = session.clone();
         drop(sessions);
@@ -201,11 +199,10 @@ impl Pairings {
     pub fn deny(&self, id: Uuid) -> Result<Session> {
         let mut sessions = self.live();
         let session = &mut sessions.get_mut(&id).ok_or(Error::Expired)?.session;
-        if session.status == Status::Collected {
+        if matches!(session.status, Status::Collected { .. }) {
             return Err(Error::Conflict("this pairing was already collected".into()));
         }
         session.status = Status::Denied;
-        session.granted.clear();
         let out = session.clone();
         drop(sessions);
         self.changed();
@@ -227,10 +224,10 @@ impl Pairings {
         let answer = match &session.status {
             Status::Approved { granted } => {
                 let granted = granted.clone();
-                session.status = Status::Collected;
+                session.status = Status::Collected { granted: granted.clone() };
                 Status::Approved { granted }
             }
-            Status::Collected => Status::Approved { granted: session.granted.clone() },
+            Status::Collected { granted } => Status::Approved { granted: granted.clone() },
             other => other.clone(),
         };
         let collected = matches!(answer, Status::Approved { .. });
@@ -255,6 +252,6 @@ fn status_name(status: &Status) -> &'static str {
         Status::Requested => "requested",
         Status::Approved { .. } => "approved",
         Status::Denied => "denied",
-        Status::Collected => "collected",
+        Status::Collected { .. } => "collected",
     }
 }

@@ -31,7 +31,21 @@ async fn the_whole_ceremony_runs_pending_requested_approved_collected() {
     }
     // Collection repeats safely after a lost response.
     assert!(matches!(pairings.collect(&code, &phone()).unwrap(), Status::Approved { .. }));
-    assert_eq!(pairings.get(id).unwrap().status, Status::Collected);
+    assert_eq!(pairings.get(id).unwrap().status, Status::Collected { granted: grants(&["files:read"]) });
+}
+
+#[tokio::test]
+async fn a_session_serializes_its_status_and_grants_once() {
+    let pairings = Pairings::new("test-pair-v1");
+    let (id, code) = pairings.open(600);
+    pairings.redeem(&code, "Phone", grants(&["files:read"]), phone()).unwrap();
+    pairings.approve(id, None).unwrap();
+    let json = serde_json::to_string(&pairings.get(id).unwrap()).unwrap();
+    assert_eq!(json.matches("\"granted\"").count(), 1);
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(value["status"], "approved");
+    assert_eq!(value["granted"], serde_json::json!(["files:read"]));
+    assert_eq!(value["client"], "Phone");
 }
 
 #[tokio::test]
