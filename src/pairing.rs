@@ -242,6 +242,13 @@ impl Pairings {
     }
 }
 
+/// The session a code belongs to. A redeemer uses it to compute the
+/// request's fingerprint on its own screen, from its own identity, rather
+/// than showing whatever the host says.
+pub fn code_session(code: &str) -> Option<Uuid> {
+    code.split_once('.')?.0.parse().ok()
+}
+
 fn status_name(status: &Status) -> &'static str {
     match status {
         Status::Pending => "pending",

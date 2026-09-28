@@ -112,3 +112,15 @@ async fn a_requested_request_needs_valid_grants_and_a_name() {
     assert!(pairings.redeem(&code, "Phone", grants(&["BAD"]), phone()).is_err());
     assert!(pairings.redeem(&code, "Phone\n", grants(&["files:read"]), phone()).is_err());
 }
+
+#[tokio::test]
+async fn a_redeemer_computes_the_fingerprint_itself_from_the_code() {
+    let pairings = Pairings::new("test-pair-v1");
+    let (id, code) = pairings.open(600);
+    assert_eq!(erisauth::pairing::code_session(&code), Some(id));
+    assert_eq!(erisauth::pairing::code_session("nonsense"), None);
+    let requested = grants(&["files:read"]);
+    let session = pairings.redeem(&code, "Phone", requested.clone(), phone()).unwrap();
+    let mine = phone().fingerprint("test-pair-v1", &erisauth::pairing::code_session(&code).unwrap(), &requested);
+    assert_eq!(session.fingerprint.unwrap(), mine);
+}
