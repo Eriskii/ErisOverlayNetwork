@@ -1,5 +1,5 @@
 import { takeToken } from './model';
-import type { Outcome, State } from './types';
+import type { Added, Outcome, State } from './types';
 
 const KEY = 'erisauth.token';
 
@@ -50,3 +50,5 @@ export const approve = (bearer: string, id: string, granted: string[], passphras
 
 export const deny = (bearer: string, id: string) =>
   call<Outcome>('POST', `./api/approvals/${encodeURIComponent(id)}/deny`, bearer);
+
+export const add = (bearer: string) => call<Added>('POST', './api/devices', bearer);

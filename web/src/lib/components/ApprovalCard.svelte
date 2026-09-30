@@ -20,6 +20,8 @@
 
   // Each card is one request, keyed by its id, so its grants never change under it.
   let chosen = $state(untrack(() => new Set(approval.requested)));
+  const optional = $derived(approval.requested.filter((grant) => !approval.essential.includes(grant)));
+  const picked = $derived(optional.filter((grant) => chosen.has(grant)).length);
   let passphrase = $state('');
   let busy = $state(false);
   let error = $state('');
@@ -28,7 +30,9 @@
   const needs = $derived(needsPassphrase(device, granted));
   const beyond = (grant: string) => !device.some((held) => covers(held, grant));
   const service = $derived(approval.service === 'erisdb' ? 'ErisDB' : approval.service);
-  const key = $derived(`${approval.identity.key.slice(0, 8)}…${approval.identity.key.slice(-6)}`);
+  const key = $derived(
+    approval.identity ? `${approval.identity.key.slice(0, 8)}…${approval.identity.key.slice(-6)}` : 'unknown',
+  );
 
   function toggle(grant: string) {
     const next = new Set(chosen);
@@ -72,21 +76,36 @@
     <header>
       <div class="who">
         <h2>{approval.client}</h2>
-        <p>asks to use {service}</p>
+        <p>{approval.kind === 'device' ? `asks to join ${service}` : `asks to use ${service}`}</p>
       </div>
       <span class="faint" title="Time left to answer">{remaining(approval.expires, now)}</span>
     </header>
 
-    <dl>
-      <dt>program</dt>
-      <dd><code>{approval.executable ?? 'unknown'}</code>{#if approval.pid}<span class="faint pid">pid {approval.pid}</span>{/if}</dd>
-      <dt>key</dt>
-      <dd><code title={approval.identity.key}>{approval.identity.kind} {key}</code></dd>
-    </dl>
+    {#if approval.kind === 'device'}
+      <div class="compare">
+        <p class="kicker">Compare with the new device</p>
+        <strong>{approval.fingerprint ?? '?'}</strong>
+        <p>Approve only if both screens show this code.</p>
+      </div>
+    {:else}
+      <dl>
+        <dt>program</dt>
+        <dd><code>{approval.executable ?? 'unknown'}</code>{#if approval.pid}<span class="faint pid">pid {approval.pid}</span>{/if}</dd>
+        <dt>key</dt>
+        <dd><code title={approval.identity?.key}>{approval.identity?.kind} {key}</code></dd>
+      </dl>
+    {/if}
 
     <fieldset>
       <legend class="kicker">It wants</legend>
-      {#each approval.requested as grant (grant)}
+      {#if approval.essential.length}
+        <label class="grant fixed" title={approval.essential.join('\n')}>
+          <input type="checkbox" checked disabled />
+          <span>Act as an ErisAuth device</span>
+          <span class="faint">open and approve pairings, ask home</span>
+        </label>
+      {/if}
+      {#each optional as grant (grant)}
         <label class="grant">
           <input type="checkbox" checked={chosen.has(grant)} onchange={() => toggle(grant)} disabled={busy} />
           <code>{grant}</code>
@@ -119,7 +138,7 @@
       <div class="actions">
         <button type="button" class="button" disabled={busy} onclick={() => answer(false)}>Deny</button>
         <button type="submit" class="button primary" disabled={busy || !granted.length || (needs && !passphrase)}>
-          {granted.length === approval.requested.length ? 'Approve' : `Approve ${granted.length} of ${approval.requested.length}`}
+          {picked === optional.length ? 'Approve' : `Approve ${picked} of ${optional.length}`}
         </button>
       </div>
     </form>
@@ -207,6 +226,29 @@
     padding: 0;
   }
 
+  .compare {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    border: 1px solid var(--color-panel-4);
+    border-radius: 6px;
+    background: var(--color-panel-1);
+    padding: 12px;
+  }
+
+  .compare strong {
+    color: var(--color-text);
+    font: 600 22px/1 var(--font-mono);
+    letter-spacing: 0.08em;
+  }
+
+  .compare p:last-child {
+    margin: 0;
+    color: var(--color-subtext);
+    font-size: 11px;
+  }
+
   .pid {
     margin-left: 8px;
     white-space: nowrap;
@@ -220,6 +262,14 @@
     padding: 5px 6px;
     font-size: 12px;
     cursor: pointer;
+  }
+
+  .grant.fixed {
+    cursor: default;
+  }
+
+  .grant.fixed .faint {
+    margin-left: auto;
   }
 
   .grant:hover {

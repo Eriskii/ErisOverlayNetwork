@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import * as api from '$lib/api';
+  import AddDevice from '$lib/components/AddDevice.svelte';
   import ApprovalCard from '$lib/components/ApprovalCard.svelte';
   import type { State } from '$lib/types';
 
@@ -78,7 +79,7 @@
   {:else if current && !approvals.length}
     <section class="note quiet">
       <h2>Nothing is waiting</h2>
-      <p>When an app on this device asks to sign in, it shows up here.</p>
+      <p>When an app on this device asks to sign in, or a new device asks to join, it shows up here.</p>
       <p class="faint">Approves by itself: {current.device.grants.filter((g) => !g.startsWith('meta:') && !g.startsWith('erisauth:')).join(', ') || 'nothing; everything takes the passphrase'}</p>
     </section>
   {:else if current && bearer}
@@ -93,6 +94,10 @@
         />
       {/each}
     </section>
+  {/if}
+
+  {#if current?.device.joined && bearer && !problem}
+    <AddDevice {bearer} {now} waiting={approvals.map((a) => a.id)} />
   {/if}
 </main>
 

@@ -49,6 +49,21 @@ fragment, which the browser never sends. Any process of the same user can
 reach the socket, as it can read the device's key. What the device approves by itself is within its
 ceiling either way, and the passphrase stands between such a process and anything beyond it.
 
+### Adding a device from one you have
+
+A device that has joined adds the next one; nothing needs running on the ErisDB machine. On the page,
+**Add a device** shows a QR code and the command to run on the new device; at a terminal,
+`erisauth add` prints both and waits:
+
+```sh
+erisauth join --name phone --ceiling 'notes:*' 'erisdb://pair/…'   # on the new device
+```
+
+The ticket crosses from one screen to another, so the person compares the fingerprint both show before
+approving, as with any ErisLogin pairing. What makes the newcomer an ErisAuth device is granted or
+refused whole; its ceiling can be narrowed. A ceiling beyond the approving device's own grants takes
+the passphrase, through home.
+
 ## Home
 
 Home is ErisAuth's plugin in [ErisDB](https://github.com/Eriskii/ErisDB). It is an ErisDB

@@ -10,6 +10,7 @@
 //! GET  /api/state                   {device: {name, joined, grants}, approvals: […]}
 //! POST /api/approvals/{id}/approve  {granted, passphrase?} → {ok: true} or {error, message}
 //! POST /api/approvals/{id}/deny     → {ok: true} or {error, message}
+//! POST /api/devices                 → {id, ticket, svg, expires}: a ticket a new device joins with
 //! ```
 
 use std::path::Path;
@@ -69,6 +70,7 @@ pub async fn listen(
         .route("/api/state", get(state))
         .route("/api/approvals/{id}/approve", post(approve))
         .route("/api/approvals/{id}/deny", post(deny))
+        .route("/api/devices", post(add))
         .route_layer(middleware::from_fn_with_state(page.clone(), authorize))
         .with_state(page);
     let app = Router::new()
@@ -121,6 +123,10 @@ async fn approve(
 
 async fn deny(State(page): State<Page>, UrlPath(id): UrlPath<Uuid>) -> Json<serde_json::Value> {
     Json(page.agent.deny(id))
+}
+
+async fn add(State(page): State<Page>) -> Json<serde_json::Value> {
+    Json(page.agent.add().await)
 }
 
 fn serve(path: &str) -> Response {

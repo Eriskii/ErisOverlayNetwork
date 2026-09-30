@@ -10,6 +10,7 @@
 //! {"op":"watch"}                                      → {"approvals":[…]} on every change
 //! {"op":"decide","id":…,"granted":[…],"passphrase":…} → {"ok":true} or {"error":…}
 //! {"op":"deny","id":…}                                → {"ok":true} or {"error":…}
+//! {"op":"add"}                                        → {"id","ticket","svg","expires"}: a new device joins with it
 //! ```
 //!
 //! Any process of this user can connect, as it can read the device's key.
@@ -119,6 +120,7 @@ async fn connection(stream: UnixStream, agent: Arc<Agent>) -> Result<()> {
             }
         }
         Some("approvals") => send(&mut write, &json!({"approvals": agent.approvals()})).await,
+        Some("add") => send(&mut write, &agent.add().await).await,
         Some("watch") => {
             let mut changes = agent.subscribe();
             let mut rest = [0u8; 1];

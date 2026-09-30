@@ -1,4 +1,5 @@
-//! `erisauth approvals`: answer apps' requests at a terminal.
+//! Answering at a terminal: `erisauth approvals` for requests as they
+//! arrive, and `erisauth add` to show a ticket a new device joins with.
 
 use std::collections::HashSet;
 use std::io::{IsTerminal, Write};
@@ -15,11 +16,13 @@ use super::Paths;
 /// Wrong passphrases the prompt accepts for one request before it leaves the request open.
 const TRIES: usize = 3;
 
+async fn connect(paths: &Paths) -> Result<UnixStream> {
+    UnixStream::connect(paths.socket()).await.context("ErisAuth is not running; start `erisauth serve`")
+}
+
 /// Send one line to the daemon and read its one-line answer.
 async fn say(paths: &Paths, message: Value) -> Result<Value> {
-    let stream =
-        UnixStream::connect(paths.socket()).await.context("ErisAuth is not running; start `erisauth serve`")?;
-    let (read, mut write) = stream.into_split();
+    let (read, mut write) = connect(paths).await?.into_split();
     write.write_all(format!("{message}\n").as_bytes()).await?;
     let mut line = String::new();
     BufReader::new(read).read_line(&mut line).await?;
@@ -28,25 +31,44 @@ async fn say(paths: &Paths, message: Value) -> Result<Value> {
 
 /// Answer requests as they arrive; with `once`, stop after the first.
 pub async fn run(paths: &Paths, once: bool) -> Result<()> {
-    let stream =
-        UnixStream::connect(paths.socket()).await.context("ErisAuth is not running; start `erisauth serve`")?;
-    let (read, mut write) = stream.into_split();
+    let mut out = std::io::stdout();
+    writeln!(out, "Waiting for requests. Ctrl-C stops.")?;
+    answer_each(paths, &mut out, None, once).await
+}
+
+/// Show a ticket for a new device, then answer its request.
+pub async fn add(paths: &Paths) -> Result<()> {
+    let added = say(paths, json!({"op": "add"})).await?;
+    if let Some(why) = added["message"].as_str() {
+        bail!("{why}");
+    }
+    let encoded = added["ticket"].as_str().context("ErisAuth sent no ticket")?;
+    let id = added["id"].as_str().context("ErisAuth sent no id")?.to_string();
+    let ticket = erislogin::ticket::Ticket::parse("erisdb", encoded)?;
+    let mut out = std::io::stdout();
+    prompt::show(&mut out, "ErisDB", &ticket, encoded)?;
+    writeln!(out, "\nOn the new device, run:\n\n  erisauth join '{encoded}'\n")?;
+    writeln!(out, "Waiting for it to ask. Ctrl-C stops.")?;
+    answer_each(paths, &mut out, Some(id), true).await
+}
+
+/// Put each waiting request to the person, or only request `only`.
+async fn answer_each(paths: &Paths, out: &mut impl Write, only: Option<String>, once: bool) -> Result<()> {
+    let (read, mut write) = connect(paths).await?.into_split();
     write.write_all(b"{\"op\":\"watch\"}\n").await?;
     let mut updates = BufReader::new(read).lines();
     let mut lines = prompt::stdin_lines();
     let mut seen = HashSet::new();
-    let mut out = std::io::stdout();
-    writeln!(out, "Waiting for apps to ask. Ctrl-C stops.")?;
     loop {
         let Some(update) = updates.next_line().await? else { bail!("ErisAuth stopped") };
         let update: Value = serde_json::from_str(&update)?;
         for approval in update["approvals"].as_array().into_iter().flatten() {
             let Some(id) = approval["id"].as_str() else { continue };
-            if !seen.insert(id.to_string()) {
+            if only.as_deref().is_some_and(|only| only != id) || !seen.insert(id.to_string()) {
                 continue;
             }
             prompt::drain(&mut lines);
-            answer(paths, &mut lines, &mut out, approval).await?;
+            answer(paths, &mut lines, out, approval).await?;
             if once {
                 return Ok(());
             }
@@ -76,16 +98,22 @@ async fn answer(
     let id = &approval["id"];
     let expires = approval["expires"].as_i64().unwrap_or_else(erislogin::now);
     let asked = strings(&approval["requested"]);
-    let program = approval["executable"].as_str().unwrap_or("an unknown program");
     let service = match approval["service"].as_str() {
         Some("erisdb") => "ErisDB",
         Some(other) => other,
         None => "a service",
     };
-    writeln!(out, "\n{} asks to use {service}.", approval["client"].as_str().unwrap_or("An app"))?;
-    match approval["pid"].as_i64() {
-        Some(pid) => writeln!(out, "  program  {program} (pid {pid})")?,
-        None => writeln!(out, "  program  {program}")?,
+    if approval["kind"] == "device" {
+        writeln!(out, "\n{} asks to join {service}.", approval["client"].as_str().unwrap_or("A device"))?;
+        writeln!(out, "  Compare this code with the new device: {}", approval["fingerprint"].as_str().unwrap_or("?"))?;
+        writeln!(out, "  Approve only if both screens show the same code.")?;
+    } else {
+        let program = approval["executable"].as_str().unwrap_or("an unknown program");
+        writeln!(out, "\n{} asks to use {service}.", approval["client"].as_str().unwrap_or("An app"))?;
+        match approval["pid"].as_i64() {
+            Some(pid) => writeln!(out, "  program  {program} (pid {pid})")?,
+            None => writeln!(out, "  program  {program}")?,
+        }
     }
     if approval["needs_passphrase"] == true {
         writeln!(out, "  This asks for more than this device approves by itself; approving takes the passphrase.")?;
@@ -107,11 +135,8 @@ async fn answer(
             Some("needs_passphrase") if given.is_none() => {}
             Some("wrong_passphrase") => writeln!(out, "That is not the passphrase.")?,
             Some("locked") => {
-                writeln!(
-                    out,
-                    "Too many wrong passphrases from this device; try again in {} s.",
-                    answer["retry_after"]
-                )?;
+                let wait = answer["retry_after"].as_i64().unwrap_or_default();
+                writeln!(out, "Too many wrong passphrases from this device; try again in {wait} s.")?;
                 return Ok(());
             }
             Some(_) => {

@@ -21,7 +21,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Join this device to ErisDB, with a ticket from `erisdb pair` or another device.
+    /// Join this device to ErisDB, with a ticket from `erisdb pair` or from
+    /// `erisauth add` on a device that has joined.
     Join {
         /// What to call this device; its hostname when omitted.
         #[arg(long)]
@@ -39,6 +40,8 @@ enum Command {
         #[arg(long)]
         no_notify: bool,
     },
+    /// Show a ticket another device joins with, and approve it here.
+    Add,
     /// Open the approval page in the browser.
     Open,
     /// Answer apps' requests at this terminal.
@@ -117,6 +120,7 @@ async fn main() -> Result<()> {
             device::join(&paths, &ticket, &name, &ceiling, |line| println!("{line}")).await?;
         }
         Command::Serve { no_notify } => device::serve(&device::Paths::from_env()?, !no_notify).await?,
+        Command::Add => device::prompt::add(&device::Paths::from_env()?).await?,
         Command::Open => {
             let link = device::page_link(&device::Paths::from_env()?)?;
             println!("{link}");

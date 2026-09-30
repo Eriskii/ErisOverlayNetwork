@@ -1,12 +1,17 @@
-//! The requests apps have put to this device, from ticket to answer.
+//! The requests put to this device, from ticket to answer.
 //!
 //! An app asks; the device cuts a pairing at ErisDB and hands the app its
 //! ticket. When the pairing is redeemed, the device checks that the app
 //! that asked is the one that redeemed it: the same key, name and grants.
-//! Anything else is denied before the person sees it. Otherwise the request
-//! waits for the person, who approves all or part of it, or says no. What
-//! fits inside the device's own grants the device approves itself; anything
-//! more goes to home with the passphrase.
+//! Anything else is denied before the person sees it.
+//!
+//! A new device joins with a ticket this device shows ([`Agent::add`]).
+//! That ticket crosses from one screen to another, so the person compares
+//! the fingerprint both devices show instead.
+//!
+//! Either way the request then waits for the person, who approves all or
+//! part of it, or says no. What fits inside this device's own grants the
+//! device approves itself; anything more goes to home with the passphrase.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -35,15 +40,32 @@ pub struct Peer {
     pub executable: Option<PathBuf>,
 }
 
+/// Who is asking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Kind {
+    /// An app on this device, over the socket.
+    App,
+    /// Another device, with a ticket this device showed.
+    Device,
+}
+
 /// A request waiting for the person, as the prompt and the page show it.
 #[derive(Debug, Clone, Serialize)]
 pub struct Approval {
     /// The ErisDB pairing this request is.
     pub id: Uuid,
+    pub kind: Kind,
     pub service: String,
     pub client: String,
     pub requested: Vec<String>,
-    pub identity: erislogin::identity::Identity,
+    /// The key asking; a device's is known once it redeems the ticket.
+    pub identity: Option<erislogin::identity::Identity>,
+    /// For a device: the code both screens show, to compare.
+    pub fingerprint: Option<String>,
+    /// For a device: what it asks for to be an ErisAuth device at all, which
+    /// the person grants or refuses whole; the rest of `requested` is its ceiling.
+    pub essential: Vec<String>,
     pub pid: Option<i32>,
     pub executable: Option<PathBuf>,
     /// True when the request asks for more than this device may approve by itself.
@@ -142,19 +164,11 @@ impl Agent {
         approvals
     }
 
-    /// Start a request: cut a pairing and return the ticket for the app.
-    pub async fn open(&self, ask: &Ask, peer: Peer) -> Result<(Uuid, String), String> {
+    /// Cut a pairing at ErisDB: its id, a ticket naming ErisDB, and when it expires.
+    async fn cut(&self) -> Result<(Uuid, String, i64), String> {
         let (Some(db), Some(joined)) = (&self.db, &self.joined) else {
             return Err("this device has not joined ErisDB; run `erisauth join` first".into());
         };
-        if ask.service != "erisdb" {
-            return Err(format!("ErisAuth signs apps in to erisdb, not {:?}", ask.service));
-        }
-        if ask.client.trim().is_empty() || ask.client.len() > 128 || ask.client.chars().any(char::is_control) {
-            return Err("an app names itself in 1 to 128 printable characters".into());
-        }
-        permission::check_grants(&ask.requested).map_err(|e| e.to_string())?;
-
         let (status, cut) = db
             .request("POST", "/v1/pairings", Some(json!({"ttl_secs": TICKET_SECS})))
             .await
@@ -170,12 +184,66 @@ impl Agent {
             .with_addrs(joined.addrs.clone())
             .encode("erisdb")
             .map_err(|e| e.to_string())?;
+        Ok((id, ticket, expires))
+    }
+
+    /// Show a ticket a new device joins with: `{id, ticket, svg, expires}`,
+    /// the svg being the ticket as a QR code. Its request comes to the
+    /// person like an app's, with the fingerprint to compare.
+    pub async fn add(self: &Arc<Self>) -> Value {
+        let (id, ticket, expires) = match self.cut().await {
+            Ok(cut) => cut,
+            Err(why) => return failed("cannot_add", why),
+        };
+        let svg = match erislogin::qr::svg(&ticket) {
+            Ok(svg) => svg,
+            Err(e) => return failed("cannot_add", e.to_string()),
+        };
         let approval = Approval {
             id,
+            kind: Kind::Device,
+            service: "erisdb".into(),
+            client: String::new(),
+            requested: Vec::new(),
+            identity: None,
+            fingerprint: None,
+            essential: Vec::new(),
+            pid: None,
+            executable: None,
+            needs_passphrase: false,
+            expires,
+        };
+        self.pending().insert(id, Pending { approval, asking: false, decided: None });
+        let agent = self.clone();
+        tokio::spawn(async move {
+            if let Decision::Denied(_) = agent.settle(id).await {
+                agent.deny_at_erisdb(id).await;
+            }
+            agent.pending().remove(&id);
+            agent.changed();
+        });
+        json!({"id": id, "ticket": ticket, "svg": svg, "expires": expires})
+    }
+
+    /// Start an app's request: cut a pairing and return the ticket for the app.
+    pub async fn open(&self, ask: &Ask, peer: Peer) -> Result<(Uuid, String), String> {
+        if ask.service != "erisdb" {
+            return Err(format!("ErisAuth signs apps in to erisdb, not {:?}", ask.service));
+        }
+        if ask.client.trim().is_empty() || ask.client.len() > 128 || ask.client.chars().any(char::is_control) {
+            return Err("an app names itself in 1 to 128 printable characters".into());
+        }
+        permission::check_grants(&ask.requested).map_err(|e| e.to_string())?;
+        let (id, ticket, expires) = self.cut().await?;
+        let approval = Approval {
+            id,
+            kind: Kind::App,
             service: ask.service.clone(),
             client: ask.client.clone(),
             requested: ask.requested.clone(),
-            identity: ask.identity.clone(),
+            identity: Some(ask.identity.clone()),
+            fingerprint: None,
+            essential: Vec::new(),
             pid: peer.pid,
             executable: peer.executable,
             needs_passphrase: false,
@@ -218,10 +286,10 @@ impl Agent {
 
     async fn settle(self: &Arc<Self>, id: Uuid) -> Decision {
         let Some(db) = &self.db else { return Decision::Denied("this device has not joined ErisDB".into()) };
-        let Some(ask) = self.pending().get(&id).map(|p| p.approval.clone()) else {
+        let Some(mut ask) = self.pending().get(&id).map(|p| p.approval.clone()) else {
             return Decision::Denied("the request is gone".into());
         };
-        // Wait for the app to redeem its ticket.
+        // Wait for the ticket to be redeemed.
         loop {
             if erislogin::now() >= ask.expires {
                 return Decision::Denied("the ticket expired before it was redeemed".into());
@@ -237,17 +305,30 @@ impl Agent {
             let body = &session["body"];
             match body["status"].as_str() {
                 Some("pending") => tokio::time::sleep(POLL).await,
-                Some("requested") => {
-                    let same = body["identity"] == json!(ask.identity)
-                        && body["client"] == json!(ask.client)
-                        && body["requested"] == json!(ask.requested);
-                    if !same {
-                        return Decision::Denied(
-                            "a different app redeemed the ticket than the one that asked; nothing was approved".into(),
-                        );
+                Some("requested") => match ask.kind {
+                    Kind::App => {
+                        let same = body["identity"] == json!(ask.identity)
+                            && body["client"] == json!(ask.client)
+                            && body["requested"] == json!(ask.requested);
+                        if !same {
+                            return Decision::Denied(
+                                "a different app redeemed the ticket than the one that asked; nothing was approved"
+                                    .into(),
+                            );
+                        }
+                        break;
                     }
-                    break;
-                }
+                    // The person checks a device by the fingerprint both screens show.
+                    Kind::Device => {
+                        ask.client = body["client"].as_str().unwrap_or("a device").to_string();
+                        ask.requested = serde_json::from_value(body["requested"].clone()).unwrap_or_default();
+                        ask.identity = serde_json::from_value(body["identity"].clone()).ok();
+                        ask.fingerprint = body["fingerprint"].as_str().map(str::to_string);
+                        ask.essential =
+                            ask.requested.iter().filter(|g| super::BASE.contains(&g.as_str())).cloned().collect();
+                        break;
+                    }
+                },
                 Some(other) => return Decision::Denied(format!("the pairing is {other}")),
                 None => return Decision::Denied("ErisDB sent a pairing with no status".into()),
             }
@@ -262,8 +343,9 @@ impl Agent {
         let shown = {
             let mut pending = self.pending();
             let Some(entry) = pending.get_mut(&id) else { return Decision::Denied("the request is gone".into()) };
+            ask.needs_passphrase = needs_passphrase;
             entry.asking = true;
-            entry.approval.needs_passphrase = needs_passphrase;
+            entry.approval = ask.clone();
             entry.approval.clone()
         };
         self.changed();
@@ -304,7 +386,7 @@ impl Agent {
             return failed("bad_grants", e.to_string());
         }
         if !permission::encloses(&approval.requested, &granted) {
-            return failed("not_requested", "approve only what the app asked for");
+            return failed("not_requested", "approve only what was asked for");
         }
         let held = match db.permissions().await {
             Ok(held) => held.grants,
@@ -316,8 +398,10 @@ impl Agent {
             let Some(passphrase) = passphrase else {
                 return failed("needs_passphrase", "this asks for more than this device may approve by itself");
             };
-            let input =
-                json!({"pairing": id, "granted": granted, "identity": approval.identity, "passphrase": passphrase});
+            let Some(identity) = approval.identity else {
+                return failed("refused", "the request names no key for home to check");
+            };
+            let input = json!({"pairing": id, "granted": granted, "identity": identity, "passphrase": passphrase});
             db.call_plugin("erisauth", "approve", input).await
         }
         .unwrap_or_else(|e| (0, json!({"error": "unreachable", "message": format!("{e:#}")})));

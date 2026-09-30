@@ -112,3 +112,19 @@ async fn every_file_the_page_references_is_served() {
     }
     assert_eq!(reqwest::get(format!("{base}/ui/missing.js")).await.unwrap().status(), 404);
 }
+
+#[tokio::test]
+async fn the_page_shows_a_ticket_for_a_new_device() {
+    let core = Core::start().await;
+    let mut device = Device::new();
+    device.join(&core, "Laptop", &["*"]).await;
+    device.serve().await;
+    let (base, token) = page(&device);
+    let http = reqwest::Client::new();
+    assert_eq!(http.post(format!("{base}/api/devices")).send().await.unwrap().status(), 401);
+    let added: serde_json::Value =
+        http.post(format!("{base}/api/devices")).bearer_auth(&token).send().await.unwrap().json().await.unwrap();
+    assert!(added["ticket"].as_str().unwrap().starts_with("erisdb://pair/"), "{added}");
+    assert!(added["svg"].as_str().unwrap().contains("<svg"), "{added}");
+    assert!(added["expires"].as_i64().unwrap() > 0);
+}
