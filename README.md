@@ -5,7 +5,7 @@ newcomer scans it and asks for permissions, both screens show the same fingerpri
 approves all, some, or none of the request. Crate `erislogin`.
 
 ```toml
-erislogin = { git = "https://github.com/Eriskii/ErisLogin", tag = "v0.4.0" }
+erislogin = { git = "https://github.com/Eriskii/ErisLogin", tag = "v0.4.1" }
 ```
 
 Features `iroh` (`key`, `Ticket::endpoint_addr`), `qr`, `prompt` and `agent` are on by default. A client

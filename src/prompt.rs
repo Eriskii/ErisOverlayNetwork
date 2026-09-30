@@ -77,34 +77,45 @@ pub async fn answer_before(lines: &mut UnboundedReceiver<String>, expires: i64) 
     }
 }
 
-/// Put `request` to the person: approve as asked, select some, or deny.
-/// Returns the grants approved, or `None` for a denial.
-///
-/// Blank or unrecognized input asks again. Only `d`, or an explicitly empty
-/// selection after `s`, denies; invalid numbers ask again rather than
-/// approving part of a selection. There is no grant-everything shortcut.
+/// Put `request` to the person: show the fingerprint to compare and what is
+/// asked, then [`choose`]. Returns the grants approved, or `None` for a denial.
 pub async fn decide(
     lines: &mut UnboundedReceiver<String>,
     out: &mut impl Write,
     request: &Request,
 ) -> Result<Option<Vec<String>>> {
-    let asked = &request.asked;
     writeln!(out, "\n\nCompare this code with the app: {}", request.fingerprint)?;
     writeln!(out, "Approve only if both displays match.\n{} wants:", request.client)?;
+    choose(lines, out, &request.asked, request.expires).await
+}
+
+/// List `asked`, then let the person approve it as asked, select some, or
+/// deny, before `expires`. Returns the grants approved, or `None` for a
+/// denial.
+///
+/// Blank or unrecognized input asks again. Only `d`, or an explicitly empty
+/// selection after `s`, denies; invalid numbers ask again rather than
+/// approving part of a selection. There is no grant-everything shortcut.
+pub async fn choose(
+    lines: &mut UnboundedReceiver<String>,
+    out: &mut impl Write,
+    asked: &[String],
+    expires: i64,
+) -> Result<Option<Vec<String>>> {
     for (i, grant) in asked.iter().enumerate() {
         writeln!(out, "  {}. {grant}", i + 1)?;
     }
     writeln!(out, "\n[a] approve as asked   [s] select   [d] deny")?;
     prompt(out, "> ")?;
     loop {
-        let answer = answer_before(lines, request.expires).await?;
+        let answer = answer_before(lines, expires).await?;
         match answer.trim().to_ascii_lowercase().as_str() {
-            "a" => return Ok(Some(asked.clone())),
+            "a" => return Ok(Some(asked.to_vec())),
             "d" => return Ok(None),
             "s" => loop {
                 writeln!(out, "Numbers to approve, comma separated (empty denies):")?;
                 prompt(out, "> ")?;
-                let picks = answer_before(lines, request.expires).await?;
+                let picks = answer_before(lines, expires).await?;
                 if picks.trim().is_empty() {
                     return Ok(None);
                 }
@@ -130,7 +141,7 @@ pub async fn decide(
 
 /// Drop whatever was typed before a request appeared. Keystrokes entered
 /// while waiting are not an answer to a request the person has not seen; in
-/// particular, a queued newline must not deny it. Call this before [`decide`].
+/// particular, a queued newline must not deny it. Call this before [`decide`] or [`choose`].
 pub fn drain(lines: &mut UnboundedReceiver<String>) {
     while lines.try_recv().is_ok() {}
 }
