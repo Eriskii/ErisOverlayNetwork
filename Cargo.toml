@@ -1,10 +1,10 @@
 [package]
-name = "erisauth"
-version = "0.2.0"
+name = "erislogin"
+version = "0.3.0"
 edition = "2024"
 description = "Pairing devices and apps over Iroh: scannable tickets, fingerprint ceremonies, signed tokens, permissions, keys"
 license = "MIT"
-repository = "https://github.com/Eriskii/ErisAuth"
+repository = "https://github.com/Eriskii/ErisLogin"
 readme = "README.md"
 keywords = ["iroh", "pairing", "qr", "capability", "auth"]
 categories = ["authentication", "network-programming"]

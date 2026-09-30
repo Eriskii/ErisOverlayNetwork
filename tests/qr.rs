@@ -1,4 +1,4 @@
-use erisauth::qr;
+use erislogin::qr;
 
 fn decode(side: u32, pixels: Vec<u8>) -> String {
     let img =

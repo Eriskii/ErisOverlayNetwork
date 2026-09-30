@@ -633,8 +633,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
-name = "erisauth"
-version = "0.2.0"
+name = "erislogin"
+version = "0.3.0"
 dependencies = [
  "base64 0.22.1",
  "hmac",
@@ -4135,9 +4135,9 @@ name = "erissandbox"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "erisforge"
+name = "erisharness"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "erisharness"
+name = "erisforge"
 version = "0.1.0"

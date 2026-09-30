@@ -1,4 +1,4 @@
-//! erisauth: how an Eris app lets one device or app into another.
+//! erislogin: how an Eris app lets one device or app into another.
 //!
 //! Pairing is a ceremony between two screens and a person. The host shows a
 //! [ticket](ticket) — its address and a one-time code — as a [QR code](qr).

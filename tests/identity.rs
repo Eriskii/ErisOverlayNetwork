@@ -1,6 +1,6 @@
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
-use erisauth::identity::{Identity, fingerprint};
+use erislogin::identity::{Identity, fingerprint};
 use sha2::Digest;
 
 const KEY: &str = "e718b50236b0b98637fbf39cb4040e79800094313dc195e221e8e075304a6a06";

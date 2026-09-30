@@ -1,4 +1,4 @@
-use erisauth::key;
+use erislogin::key;
 
 #[test]
 fn a_derived_key_is_stable_per_secret_and_tag() {

@@ -1,5 +1,5 @@
-use erisauth::Error;
-use erisauth::token::{open, seal};
+use erislogin::Error;
+use erislogin::token::{open, seal};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]

@@ -1,4 +1,4 @@
-use erisauth::prompt::{Request, decide};
+use erislogin::prompt::{Request, decide};
 
 fn request() -> Request {
     Request {

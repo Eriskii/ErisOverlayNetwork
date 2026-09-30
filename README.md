@@ -1,11 +1,11 @@
-# ErisAuth
+# ErisLogin
 
 Pairing for Eris apps and devices over [Iroh](https://iroh.computer): a host shows a QR code, a
 newcomer scans it and asks for permissions, both screens show the same fingerprint, and a person
-approves all, some, or none of the request. Crate `erisauth`.
+approves all, some, or none of the request. Crate `erislogin`.
 
 ```toml
-erisauth = { git = "https://github.com/Eriskii/ErisAuth", tag = "v0.2.0" }
+erislogin = { git = "https://github.com/Eriskii/ErisLogin", tag = "v0.3.0" }
 ```
 
 | Module       | What it holds                                                                                 |
@@ -22,7 +22,7 @@ erisauth = { git = "https://github.com/Eriskii/ErisAuth", tag = "v0.2.0" }
 ## The ceremony
 
 ```rust
-use erisauth::{identity::Identity, pairing::{Pairings, Status}, ticket::Ticket};
+use erislogin::{identity::Identity, pairing::{Pairings, Status}, ticket::Ticket};
 
 // Host
 let pairings = Pairings::new("myapp-pair-v1");
