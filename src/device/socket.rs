@@ -30,8 +30,8 @@ use uuid::Uuid;
 
 use super::agent::{Agent, Peer};
 
-/// Bind the socket, replacing one left behind, and serve until the process ends.
-pub async fn listen(path: &Path, agent: Arc<Agent>) -> Result<()> {
+/// Bind the socket, replacing one left behind.
+pub fn bind(path: &Path) -> Result<UnixListener> {
     let dir = path.parent().context("the socket has a directory")?;
     super::private_dir(dir)?;
     match std::fs::remove_file(path) {
@@ -41,6 +41,11 @@ pub async fn listen(path: &Path, agent: Arc<Agent>) -> Result<()> {
     let listener = UnixListener::bind(path).with_context(|| format!("listening on {}", path.display()))?;
     #[cfg(unix)]
     std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+    Ok(listener)
+}
+
+/// Serve apps and the person on `listener` until the process ends.
+pub async fn serve(listener: UnixListener, agent: Arc<Agent>) -> Result<()> {
     loop {
         let (stream, _) = listener.accept().await?;
         let agent = agent.clone();

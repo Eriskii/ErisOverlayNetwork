@@ -39,6 +39,8 @@ enum Command {
         #[arg(long)]
         no_notify: bool,
     },
+    /// Open the approval page in the browser.
+    Open,
     /// Answer apps' requests at this terminal.
     Approvals {
         /// Stop after answering one request.
@@ -115,6 +117,11 @@ async fn main() -> Result<()> {
             device::join(&paths, &ticket, &name, &ceiling, |line| println!("{line}")).await?;
         }
         Command::Serve { no_notify } => device::serve(&device::Paths::from_env()?, !no_notify).await?,
+        Command::Open => {
+            let link = device::page_link(&device::Paths::from_env()?)?;
+            println!("{link}");
+            device::open(&link);
+        }
         Command::Approvals { once } => device::prompt::run(&device::Paths::from_env()?, once).await?,
         Command::Home { command } => match command {
             HomeCommand::Setup { home: dir, erisdb, ticket } => {

@@ -1,0 +1,142 @@
+/* ErisDE's palette and type: oklch greys, one accent and its hue-rotated siblings. */
+:root {
+  --accent-l: 0.7489;
+  --accent-c: 0.1019;
+  --color-panel-0: oklch(0.15 0 0);
+  --color-panel-1: oklch(0.18 0 0);
+  --color-panel-2: oklch(0.21 0 0);
+  --color-panel-3: oklch(0.24 0 0);
+  --color-panel-4: oklch(0.29 0 0);
+  --color-panel-5: oklch(0.36 0 0);
+  --color-panel-6: oklch(0.47 0 0);
+  --color-workspace-base: oklch(0.21 0 0);
+  --color-text: oklch(0.95 0 0);
+  --color-subtext: oklch(0.76 0 0);
+  --color-subsubtext: oklch(0.58 0 0);
+  --color-accent: oklch(var(--accent-l) var(--accent-c) 299.69);
+  --color-green: oklch(var(--accent-l) var(--accent-c) 145);
+  --color-blue: oklch(var(--accent-l) var(--accent-c) 255);
+  --color-red: oklch(var(--accent-l) var(--accent-c) 25);
+  --color-teal: oklch(var(--accent-l) var(--accent-c) 195);
+  --color-yellow: oklch(var(--accent-l) var(--accent-c) 100);
+  --color-orange: oklch(var(--accent-l) var(--accent-c) 65);
+  --color-overlay-subtle: oklch(1 0 0 / 0.025);
+  --color-overlay-soft: oklch(1 0 0 / 0.04);
+  --color-overlay-hover: oklch(1 0 0 / 0.07);
+  --color-shadow-strong: oklch(0 0 0 / 0.55);
+  --working: #cee943;
+  --failed: #db6b75;
+  --surface: var(--color-panel-1);
+  --font-ui:
+    'Google Sans Flex Variable', ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    sans-serif;
+  --font-mono: ui-monospace, 'SFMono-Regular', Consolas, monospace;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+  --fast: 120ms;
+  font-family: var(--font-ui);
+  color: var(--color-text);
+  background: var(--color-panel-0);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  color-scheme: dark;
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-panel-6) var(--color-panel-1);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  min-height: 100%;
+  margin: 0;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+:where(button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 1px solid var(--color-subtext);
+  outline-offset: -1px;
+}
+
+/* Shared pieces. */
+.kicker {
+  margin: 0;
+  color: var(--color-subsubtext);
+  font: 600 9px/1 var(--font-mono);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.faint {
+  color: var(--color-subsubtext);
+  font: 9px/1.3 var(--font-mono);
+}
+
+.error-line {
+  margin: 0;
+  color: var(--failed);
+  font: 10px/1.4 var(--font-mono);
+}
+
+.error-line:empty {
+  display: none;
+}
+
+.field {
+  width: 100%;
+  border: 1px solid var(--color-panel-4);
+  border-radius: 6px;
+  background: var(--color-panel-0);
+  padding: 7px 9px;
+  font-size: 12px;
+}
+
+.field:focus {
+  border-color: var(--color-panel-6);
+  outline: none;
+}
+
+.button {
+  border: 1px solid var(--color-panel-5);
+  border-radius: 6px;
+  background: var(--color-panel-3);
+  padding: 6px 14px;
+  font-size: 12px;
+  cursor: pointer;
+  transition:
+    background var(--fast) var(--ease),
+    border-color var(--fast) var(--ease);
+}
+
+.button:hover:not(:disabled) {
+  border-color: var(--color-panel-6);
+  background: var(--color-panel-4);
+}
+
+.button.primary {
+  border-color: transparent;
+  background: var(--color-accent);
+  color: var(--color-panel-0);
+  font-weight: 600;
+}
+
+.button.primary:hover:not(:disabled) {
+  background: oklch(0.8 var(--accent-c) 299.69);
+}
+
+.button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+code {
+  font-family: var(--font-mono);
+}

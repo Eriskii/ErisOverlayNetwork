@@ -68,6 +68,10 @@ pub struct Agent {
     db: Option<erisdb_client::Client>,
     joined: Option<Joined>,
     notify: bool,
+    /// The approval page's link, once it is listening.
+    page: std::sync::OnceLock<String>,
+    /// This device's grants and when they were read; the page asks every second.
+    held: tokio::sync::Mutex<Option<(std::time::Instant, Vec<String>)>>,
     pending: Mutex<BTreeMap<Uuid, Pending>>,
     changed: watch::Sender<u64>,
 }
@@ -81,7 +85,41 @@ fn failed(error: &str, message: impl Into<String>) -> Outcome {
 
 impl Agent {
     pub fn new(db: Option<erisdb_client::Client>, joined: Option<Joined>, notify: bool) -> Arc<Self> {
-        Arc::new(Agent { db, joined, notify, pending: Mutex::new(BTreeMap::new()), changed: watch::channel(0).0 })
+        Arc::new(Agent {
+            db,
+            joined,
+            notify,
+            page: std::sync::OnceLock::new(),
+            held: tokio::sync::Mutex::new(None),
+            pending: Mutex::new(BTreeMap::new()),
+            changed: watch::channel(0).0,
+        })
+    }
+
+    pub fn set_page(&self, link: String) {
+        let _ = self.page.set(link);
+    }
+
+    /// This device, as the page shows it: its name, whether it has joined
+    /// ErisDB, and the grants it holds.
+    pub async fn device(&self) -> Value {
+        let grants = match &self.db {
+            Some(db) => {
+                let mut held = self.held.lock().await;
+                match &*held {
+                    Some((read, grants)) if read.elapsed() < Duration::from_secs(10) => grants.clone(),
+                    _ => match db.permissions().await {
+                        Ok(permissions) => {
+                            *held = Some((std::time::Instant::now(), permissions.grants.clone()));
+                            permissions.grants
+                        }
+                        Err(_) => held.as_ref().map(|(_, grants)| grants.clone()).unwrap_or_default(),
+                    },
+                }
+            }
+            None => Vec::new(),
+        };
+        json!({"name": self.joined.as_ref().map(|j| &j.name), "joined": self.joined.is_some(), "grants": grants})
     }
 
     fn pending(&self) -> std::sync::MutexGuard<'_, BTreeMap<Uuid, Pending>> {
@@ -230,7 +268,7 @@ impl Agent {
         };
         self.changed();
         if self.notify {
-            super::notify::asked(&shown);
+            super::notify::asked(&shown, self.page.get().cloned());
         }
         loop {
             if let Some(decision) = self.pending().get_mut(&id).and_then(|p| p.decided.take()) {

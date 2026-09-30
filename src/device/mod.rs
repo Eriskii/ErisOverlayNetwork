@@ -8,6 +8,7 @@
 
 pub mod agent;
 pub mod notify;
+pub mod page;
 pub mod prompt;
 pub mod socket;
 
@@ -145,7 +146,15 @@ pub async fn join(
     }
 }
 
-/// Listen for apps and for the person until the process ends.
+/// The approval page's link, as the running daemon wrote it.
+pub fn page_link(paths: &Paths) -> Result<String> {
+    let path = page::link_path(&paths.runtime);
+    let link = std::fs::read_to_string(&path).context("ErisAuth is not running; start `erisauth serve`")?;
+    Ok(link.trim().to_string())
+}
+
+/// Listen for apps and for the person, on the socket and the approval page,
+/// until the process ends.
 pub async fn serve(paths: &Paths, notify: bool) -> Result<()> {
     let joined = Joined::load(paths)?;
     let db = match &joined {
@@ -153,7 +162,19 @@ pub async fn serve(paths: &Paths, notify: bool) -> Result<()> {
         None => None,
     };
     let agent = agent::Agent::new(db, joined, notify);
-    socket::listen(&paths.socket(), agent).await
+    // The socket first: a daemon that cannot take it publishes no page link.
+    let listener = socket::bind(&paths.socket())?;
+    let (link, page) = page::listen(&paths.runtime, agent.clone()).await?;
+    agent.set_page(link);
+    tokio::try_join!(socket::serve(listener, agent), page)?;
+    Ok(())
+}
+
+/// Open `link` in the person's browser.
+pub fn open(link: &str) {
+    if let Err(e) = std::process::Command::new("xdg-open").arg(link).status() {
+        eprintln!("erisauth: could not open {link}: {e}");
+    }
 }
 
 /// Create `dir` readable only by its owner.

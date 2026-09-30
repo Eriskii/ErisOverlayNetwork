@@ -39,8 +39,12 @@ ErisLogin's `agent` module:
 An app that hangs up withdraws its request, and ErisDB denies the pairing. With no ErisAuth listening,
 the app pairs by ticket as it always can.
 
-The person answers with `erisauth approvals`, which prompts for each request as it arrives, and gets a
-desktop notification unless the daemon runs with `--no-notify`. Any process of the same user can
+The person answers on the approval page, or at a terminal with `erisauth approvals`, which prompts
+for each request as it arrives. The daemon serves the page on loopback and shows a desktop
+notification for each request, unless it runs with `--no-notify`; choosing the notification, or
+running `erisauth open`, opens the page. The page's API takes a token the daemon makes when it
+starts, handed over in the link it writes to `$XDG_RUNTIME_DIR/erisauth/page` (mode 0600) in the URL
+fragment, which the browser never sends. Any process of the same user can
 reach the socket, as it can read the device's key. What the device approves by itself is within its
 ceiling either way, and the passphrase stands between such a process and anything beyond it.
 
@@ -103,10 +107,14 @@ Each takes `--home DIR`, default `/var/lib/erisauth`, which must match the `--ho
 Home's credential there is `erisdb.json`, mode 0600: back it up as a credential, or revoke the
 installation and run setup again.
 
-## Testing
+## Building and testing
+
+The approval page is a SvelteKit app in `web/`, built by `build.rs` and embedded in the binary, so a
+build needs Node 22+ and npm.
 
 ```sh
 cargo test
+(cd web && npm run check && npm test)
 ```
 
 The suite runs a real Postgres (Docker), a real ErisDB core serving the shipped manifest over HTTP
