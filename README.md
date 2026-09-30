@@ -8,6 +8,42 @@ speaks on its own: a ticket, a fingerprint on both screens, and a person approvi
 of what an app asks for. Every app keeps working with ErisLogin alone; ErisAuth approves on the
 person's behalf, and nothing an app does afterwards passes through it.
 
+## On a device
+
+A device joins ErisDB once, as an installation of its own over Iroh:
+
+```sh
+erisauth join --name laptop --ceiling 'notes:*' --ceiling 'tasks:*' 'erisdb://pair/…'
+```
+
+Cut the ticket with `erisdb pair`, compare the fingerprint, and approve. The device asks for the
+right to open and approve pairings and to ask [home](#home), plus its ceiling: the grants it may
+approve for an app by itself. Without `--ceiling` the ceiling is everything (`*`). Its key and
+standing live in `$XDG_DATA_HOME/erisauth/`.
+
+`erisauth serve` then listens on `$XDG_RUNTIME_DIR/erisauth/agent.sock`, where apps look for it with
+ErisLogin's `agent` module:
+
+1. The app says which service it wants, its name, the grants and the key it will redeem with.
+2. The device cuts a pairing at ErisDB and hands the app the ticket. The app redeems it exactly as it
+   would a scanned one.
+3. The device checks that the redeemer is the app that asked: the same key, name and grants.
+   Anything else is denied before the person sees it.
+4. The person is asked, with the program's path as the kernel reports it, not as the app claims.
+   They approve it as asked, approve part of it, or say no.
+5. What fits inside the device's grants, the device approves itself. Anything more goes to home, and
+   the person types the passphrase.
+6. The app hears the answer and collects its own credential from ErisDB. From then on it talks to
+   ErisDB directly.
+
+An app that hangs up withdraws its request, and ErisDB denies the pairing. With no ErisAuth listening,
+the app pairs by ticket as it always can.
+
+The person answers with `erisauth approvals`, which prompts for each request as it arrives, and gets a
+desktop notification unless the daemon runs with `--no-notify`. Any process of the same user can
+reach the socket, as it can read the device's key. What the device approves by itself is within its
+ceiling either way, and the passphrase stands between such a process and anything beyond it.
+
 ## Home
 
 Home is ErisAuth's plugin in [ErisDB](https://github.com/Eriskii/ErisDB). It is an ErisDB
@@ -73,5 +109,6 @@ installation and run setup again.
 cargo test
 ```
 
-The suite runs a real Postgres (Docker), a real ErisDB core serving the shipped manifest, and the
-real `erisauth` and plugin executables.
+The suite runs a real Postgres (Docker), a real ErisDB core serving the shipped manifest over HTTP
+and Iroh, the real `erisauth` daemon and plugin executables, and apps that pair over Iroh with keys
+of their own.

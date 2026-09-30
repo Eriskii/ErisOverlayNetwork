@@ -56,6 +56,9 @@ pub async fn answer(dir: &Path, invocation: Invocation) -> Result<Answer> {
     let Some(installation) = invocation.context.installation else {
         return Ok(refuse(403, "not_a_device", "only a registered ErisAuth device can ask home"));
     };
+    if !crate::erisdb::Credential::exists(dir) {
+        return Ok(refuse(503, "no_home", "home is not set up; run `erisauth home setup` on the ErisDB machine"));
+    }
     let mut db = Session::open(dir)?;
     match invocation.operation.as_str() {
         "approve" => approve(&mut db, installation, serde_json::from_value(invocation.input)?).await,

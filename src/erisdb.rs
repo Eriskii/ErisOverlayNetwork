@@ -31,6 +31,10 @@ impl Credential {
         dir.join("erisdb.json")
     }
 
+    pub fn exists(dir: &Path) -> bool {
+        Self::path(dir).exists()
+    }
+
     pub fn load(dir: &Path) -> Result<Self> {
         let path = Self::path(dir);
         let bytes = std::fs::read(&path)

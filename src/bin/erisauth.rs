@@ -1,11 +1,12 @@
-//! `erisauth`: set up and look after home, ErisAuth's plugin in ErisDB.
+//! `erisauth`: join a device, serve apps on it, answer their requests, and
+//! set up and look after home, ErisAuth's plugin in ErisDB.
 
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use erisauth::{erisdb::Session, home};
+use erisauth::{device, erisdb::Session, home};
 use uuid::Uuid;
 
 /// Where home keeps its ErisDB credential, as the shipped manifest names it.
@@ -20,6 +21,30 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Join this device to ErisDB, with a ticket from `erisdb pair` or another device.
+    Join {
+        /// What to call this device; its hostname when omitted.
+        #[arg(long)]
+        name: Option<String>,
+        /// A grant this device may approve for apps by itself; repeat for more.
+        /// Everything (`*`) when omitted. Anything beyond takes the passphrase.
+        #[arg(long = "ceiling")]
+        ceiling: Vec<String>,
+        /// The `erisdb://pair/…` ticket.
+        ticket: String,
+    },
+    /// Listen for apps on this device and put their requests to the person.
+    Serve {
+        /// Do not show desktop notifications.
+        #[arg(long)]
+        no_notify: bool,
+    },
+    /// Answer apps' requests at this terminal.
+    Approvals {
+        /// Stop after answering one request.
+        #[arg(long)]
+        once: bool,
+    },
     /// Home, ErisAuth's plugin in ErisDB. Run these on the ErisDB machine.
     Home {
         #[command(subcommand)]
@@ -78,6 +103,19 @@ fn new_passphrase() -> Result<String> {
 #[tokio::main]
 async fn main() -> Result<()> {
     match Cli::parse().command {
+        Command::Join { name, ceiling, ticket } => {
+            let paths = device::Paths::from_env()?;
+            let name = match name {
+                Some(name) => name,
+                None => std::fs::read_to_string("/proc/sys/kernel/hostname")
+                    .map(|h| h.trim().to_string())
+                    .unwrap_or_else(|_| "this device".into()),
+            };
+            let ceiling = if ceiling.is_empty() { vec!["*".to_string()] } else { ceiling };
+            device::join(&paths, &ticket, &name, &ceiling, |line| println!("{line}")).await?;
+        }
+        Command::Serve { no_notify } => device::serve(&device::Paths::from_env()?, !no_notify).await?,
+        Command::Approvals { once } => device::prompt::run(&device::Paths::from_env()?, once).await?,
         Command::Home { command } => match command {
             HomeCommand::Setup { home: dir, erisdb, ticket } => {
                 home::enroll(&dir, &erisdb, &ticket, |line| println!("{line}"))

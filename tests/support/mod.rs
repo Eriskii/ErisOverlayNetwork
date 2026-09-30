@@ -18,7 +18,6 @@ use testcontainers_modules::testcontainers::runners::AsyncRunner;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::OnceCell;
 
-pub const SECRET: &[u8] = b"erisauth-test-secret";
 pub const PASSPHRASE: &str = "correct horse battery";
 
 struct Pg {
@@ -93,6 +92,9 @@ impl Caller {
 pub struct Core {
     pub base: String,
     pub root: Caller,
+    pub secret: Vec<u8>,
+    /// Where the core answers over Iroh.
+    pub addr: iroh::EndpointAddr,
     /// The plugin's state directory, as the manifest's `--home` names it.
     pub home: PathBuf,
     _dirs: tempfile::TempDir,
@@ -121,14 +123,20 @@ impl Core {
         std::fs::write(plugins.join("erisauth.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
         let registry = erisdb::PluginRegistry::load_dir(&plugins).unwrap();
 
-        let app = erisdb::app_with_plugins(pool, SECRET.to_vec(), registry);
+        // Each core its own secret, so each has its own Iroh identity.
+        let secret = uuid::Uuid::new_v4().as_bytes().to_vec();
+        let app = erisdb::app_with_plugins(pool, secret.clone(), registry);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
+        let tcp = app.clone();
         tokio::spawn(async move {
-            axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap();
+            axum::serve(listener, tcp.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap();
         });
-        let root = Caller::new(&base, &erisdb::auth::mint(SECRET, &["*"], Some(3600), None).unwrap());
-        Core { base, root, home, _dirs: dirs }
+        let endpoint = erisdb::net::endpoint(&secret).await.unwrap();
+        let addr = erisdb::net::advertised_addr(&endpoint).await.unwrap();
+        tokio::spawn(erisdb::net::serve(endpoint, app));
+        let root = Caller::new(&base, &erisdb::auth::mint(&secret, &["*"], Some(3600), None).unwrap());
+        Core { base, root, secret, addr, home, _dirs: dirs }
     }
 
     /// Cut a pairing as the root operator: its id and a ticket for it.
@@ -141,6 +149,15 @@ impl Core {
                 .encode("erisdb")
                 .unwrap();
         (cut["id"].as_str().unwrap().to_string(), ticket)
+    }
+
+    /// A ticket for a pairing code, naming every way to reach this core.
+    pub fn ticket(&self, code: &str) -> String {
+        erislogin::ticket::Ticket::new(code.into(), Some(self.addr.id.to_string()), Some(self.base.clone()), None)
+            .unwrap()
+            .with_addrs(self.addr.ip_addrs().copied().collect())
+            .encode("erisdb")
+            .unwrap()
     }
 
     /// Run `erisauth home setup`, approving its request as the operator would.
@@ -236,4 +253,132 @@ pub async fn cut_with(caller: &Caller) -> ((String, String), i64) {
         (cut["id"].as_str().unwrap().to_string(), cut["secret"].as_str().unwrap().to_string()),
         cut["expires"].as_i64().unwrap(),
     )
+}
+
+/// One device running ErisAuth: its own data and runtime directories, the
+/// `erisauth serve` daemon, and the person at it, who answers through the
+/// daemon's socket as its approval page does.
+pub struct Device {
+    pub data: tempfile::TempDir,
+    pub runtime: tempfile::TempDir,
+    daemon: Option<tokio::process::Child>,
+}
+
+impl Device {
+    pub fn new() -> Self {
+        Device { data: tempfile::tempdir().unwrap(), runtime: tempfile::tempdir().unwrap(), daemon: None }
+    }
+
+    pub fn command(&self, args: &[&str]) -> tokio::process::Command {
+        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_erisauth"));
+        command
+            .args(args)
+            .env("XDG_DATA_HOME", self.data.path())
+            .env("XDG_RUNTIME_DIR", self.runtime.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        command
+    }
+
+    /// `erisauth join`, approved by the operator as asked.
+    pub async fn join(&self, core: &Core, name: &str, ceiling: &[&str]) -> std::process::Output {
+        let ((id, code), _) = core.cut_raw().await;
+        let ticket = core.ticket(&code);
+        let mut args = vec!["join", "--name", name];
+        for grant in ceiling {
+            args.extend(["--ceiling", grant]);
+        }
+        args.push(&ticket);
+        let child = self.command(&args).spawn().unwrap();
+        core.await_requested(&id).await;
+        let (status, approved) = core.root.post(&format!("/v1/pairings/{id}/approve"), json!({})).await;
+        assert_eq!(status, 200, "{approved}");
+        let output = tokio::time::timeout(Duration::from_secs(60), child.wait_with_output()).await.unwrap().unwrap();
+        assert!(output.status.success(), "join failed: {}", String::from_utf8_lossy(&output.stderr));
+        output
+    }
+
+    /// Start `erisauth serve` and wait for its socket.
+    pub async fn serve(&mut self) {
+        self.daemon = Some(self.command(&["serve", "--no-notify"]).spawn().unwrap());
+        let socket = self.socket();
+        tokio::time::timeout(Duration::from_secs(60), async {
+            while tokio::net::UnixStream::connect(&socket).await.is_err() {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the daemon never listened");
+    }
+
+    pub fn socket(&self) -> PathBuf {
+        erislogin::agent::socket_in(self.runtime.path())
+    }
+
+    /// Send one line to the daemon and read its one-line answer.
+    pub async fn say(&self, line: Value) -> Value {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let stream = tokio::net::UnixStream::connect(self.socket()).await.unwrap();
+        let (read, mut write) = stream.into_split();
+        write.write_all(format!("{line}\n").as_bytes()).await.unwrap();
+        let mut answer = String::new();
+        BufReader::new(read).read_line(&mut answer).await.unwrap();
+        serde_json::from_str(&answer).unwrap()
+    }
+
+    pub async fn approvals(&self) -> Vec<Value> {
+        self.say(json!({"op": "approvals"})).await["approvals"].as_array().unwrap().clone()
+    }
+
+    /// Wait until the person has something to answer.
+    pub async fn asked(&self) -> Value {
+        tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                if let Some(first) = self.approvals().await.into_iter().next() {
+                    return first;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("nothing was put to the person")
+    }
+}
+
+/// An app with its own Iroh key.
+pub struct App {
+    pub name: String,
+    pub key: [u8; 32],
+}
+
+impl App {
+    pub fn new(name: &str) -> Self {
+        App { name: name.to_string(), key: rand::random() }
+    }
+
+    pub fn identity(&self) -> erislogin::identity::Identity {
+        erislogin::identity::Identity::Iroh(iroh::SecretKey::from_bytes(&self.key).public().to_string())
+    }
+
+    pub fn ask(&self, requested: &[&str]) -> erislogin::agent::Ask {
+        erislogin::agent::Ask {
+            service: "erisdb".into(),
+            client: self.name.clone(),
+            requested: requested.iter().map(|s| s.to_string()).collect(),
+            identity: self.identity(),
+        }
+    }
+
+    /// Redeem a ticket from the agent as this app, with `key`.
+    pub async fn redeem(&self, ticket: &str, requested: &[&str], key: [u8; 32]) -> erisdb_client::Client {
+        let ticket = erislogin::ticket::Ticket::parse("erisdb", ticket).unwrap();
+        let client =
+            erisdb_client::Client::dial_addr(ticket.endpoint_addr().unwrap(), &ticket.token, &self.name, Some(key))
+                .await
+                .unwrap();
+        client.redeem_pairing(&self.name, requested).await.unwrap();
+        client
+    }
 }
