@@ -22,7 +22,8 @@ approve for an app by itself. Without `--ceiling` the ceiling is everything (`*`
 standing live in `$XDG_DATA_HOME/erisauth/`.
 
 `erisauth serve` then listens on `$XDG_RUNTIME_DIR/erisauth/agent.sock`, where apps look for it with
-ErisLogin's `agent` module:
+ErisLogin's `agent` module. An ErisDB app in Rust does all of it in one call,
+`erisdb_client::pair_via_erisauth`, which returns `None` when no ErisAuth is listening:
 
 1. The app says which service it wants, its name, the grants and the key it will redeem with.
 2. The device cuts a pairing at ErisDB and hands the app the ticket. The app redeems it exactly as it

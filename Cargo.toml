@@ -14,7 +14,7 @@ axum = "0.8"
 argon2 = { version = "0.5", features = ["std"] }
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
-erisdb-client = { git = "https://github.com/Eriskii/ErisDB", rev = "f69ca4f92e8164dd4d0b879f6aae73c5a41214a1" }
+erisdb-client = { git = "https://github.com/Eriskii/ErisDB", rev = "f19a3aa3f371675036b36e01aaff8007a74df630" }
 erislogin = { git = "https://github.com/Eriskii/ErisLogin", tag = "v0.4.1" }
 iroh = "1"
 notify-rust = "4"
@@ -29,7 +29,7 @@ tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
-erisdb = { git = "https://github.com/Eriskii/ErisDB", rev = "f69ca4f92e8164dd4d0b879f6aae73c5a41214a1" }
+erisdb = { git = "https://github.com/Eriskii/ErisDB", rev = "f19a3aa3f371675036b36e01aaff8007a74df630" }
 sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "postgres"] }
 tempfile = "3"
 testcontainers-modules = { version = "0.15", features = ["postgres"] }

@@ -202,3 +202,43 @@ async fn beyond_its_ceiling_without_home_the_person_hears_why() {
     assert!(answer["message"].as_str().unwrap().contains("erisauth home setup"), "{answer}");
     assert_eq!(device.approvals().await.len(), 1, "the request stays open");
 }
+
+#[tokio::test]
+async fn an_app_signs_in_with_one_call_and_then_talks_to_erisdb_directly() {
+    let core = Core::start().await;
+    let mut device = Device::new();
+    device.join(&core, "Laptop", &["notes:*"]).await;
+    device.serve().await;
+    let key: [u8; 32] = rand::random();
+    let socket = device.socket();
+    let cancel = Cancel::new();
+
+    let person = async {
+        let approval = device.asked().await;
+        assert_eq!(approval["client"], "Notes");
+        device.say(json!({"op": "decide", "id": approval["id"], "granted": ["notes:read"]})).await
+    };
+    let (signed_in, decided) = tokio::join!(
+        erisdb_client::pair_via_erisauth_at(
+            &socket,
+            "Notes",
+            &["notes:read", "notes:create"],
+            key,
+            Duration::from_secs(60),
+            &cancel,
+        ),
+        person,
+    );
+    assert_eq!(decided, json!({"ok": true}));
+    let (ticket, pairing) = signed_in.unwrap().expect("ErisAuth was listening");
+    let Pairing::Approved { token, granted } = pairing else { panic!("{pairing:?}") };
+    assert_eq!(granted, vec!["notes:read".to_string()]);
+
+    // The app's own installation, reached at the address the ticket gave it.
+    let app =
+        erisdb_client::Client::dial_addr(ticket.endpoint_addr().unwrap(), &token, "Notes", Some(key)).await.unwrap();
+    assert_eq!(app.permissions().await.unwrap().grants, vec!["notes:read".to_string()]);
+    let (_, clients) = core.root.get("/v1/clients").await;
+    let notes = clients["clients"].as_array().unwrap().iter().find(|c| c["name"] == "Notes").unwrap();
+    assert_eq!(notes["identity"]["key"], json!(iroh::SecretKey::from_bytes(&key).public().to_string()));
+}
