@@ -12,7 +12,13 @@
 //! QUIC handshake proves it. Browsers, which hold no key, commit to a random
 //! secret instead. Durable authority can be handed out as HMAC-signed
 //! [tokens](token) scoped by permission patterns.
+//!
+//! On a device running ErisAuth, an app can skip the ticket: it asks the
+//! [agent] for one, redeems it the same way, and the person approves it on
+//! ErisAuth's screen instead of comparing fingerprints.
 
+#[cfg(all(feature = "agent", unix))]
+pub mod agent;
 pub mod error;
 pub mod identity;
 #[cfg(feature = "iroh")]

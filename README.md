@@ -5,15 +5,16 @@ newcomer scans it and asks for permissions, both screens show the same fingerpri
 approves all, some, or none of the request. Crate `erislogin`.
 
 ```toml
-erislogin = { git = "https://github.com/Eriskii/ErisLogin", tag = "v0.3.1" }
+erislogin = { git = "https://github.com/Eriskii/ErisLogin", tag = "v0.4.0" }
 ```
 
-Features `iroh` (`key`, `Ticket::endpoint_addr`), `qr` and `prompt` are on by default. A client
+Features `iroh` (`key`, `Ticket::endpoint_addr`), `qr`, `prompt` and `agent` are on by default. A client
 that only reads tickets and signs or checks tokens can take `default-features = false` and leave
 Iroh, QR rendering and the terminal out of its build.
 
 | Module       | What it holds                                                                                 |
 | ------------ | --------------------------------------------------------------------------------------------- |
+| `agent`      | Asking the device's ErisAuth for approval over its socket, instead of showing a ticket         |
 | `ticket`     | `<app>://pair/<base64url(JSON)>`: an Iroh endpoint id and/or URL, direct addresses, a code     |
 | `qr`         | A ticket as terminal blocks, SVG, a greyscale raster, or a PNG                                |
 | `pairing`    | In-memory sessions: `pending → requested → approved → collected`, or `denied`                  |

@@ -1,6 +1,6 @@
 [package]
 name = "erislogin"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
 description = "Pairing devices and apps over Iroh: scannable tickets, fingerprint ceremonies, signed tokens, permissions, keys"
 license = "MIT"
@@ -10,11 +10,13 @@ keywords = ["iroh", "pairing", "qr", "capability", "auth"]
 categories = ["authentication", "network-programming"]
 
 [features]
-default = ["iroh", "qr", "prompt"]
+default = ["iroh", "qr", "prompt", "agent"]
 # Iroh keys (`key`) and dialable ticket addresses (`Ticket::endpoint_addr`).
 iroh = ["dep:iroh"]
 # Tickets as QR codes (`qr`).
 qr = ["dep:qrcode", "dep:png"]
+# Asking the device's ErisAuth instead of showing a ticket (`agent`, Unix).
+agent = ["tokio/net", "tokio/io-util"]
 # The host's terminal ceremony (`prompt`).
 prompt = ["qr", "tokio/rt", "tokio/macros", "tokio/time", "tokio/signal"]
 
@@ -49,3 +51,7 @@ required-features = ["qr"]
 [[test]]
 name = "prompt"
 required-features = ["prompt"]
+
+[[test]]
+name = "agent"
+required-features = ["agent"]
