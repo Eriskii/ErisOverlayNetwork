@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { covers, encloses, needsPassphrase, remaining, takeToken } from './model';
+import { covers, encloses, needsPassphrase, parseCeiling, remaining, takeToken } from './model';
 
 describe('grants', () => {
   it('match as ErisLogin matches them', () => {
@@ -41,5 +41,13 @@ describe('takeToken', () => {
     expect(takeToken('#token=abc')).toEqual({ token: 'abc', hash: '' });
     expect(takeToken('#token=abc&x=1')).toEqual({ token: 'abc', hash: '#x=1' });
     expect(takeToken('')).toEqual({ token: null, hash: '' });
+  });
+});
+
+describe('parseCeiling', () => {
+  it('reads grants separated by commas or spaces, and nothing as everything', () => {
+    expect(parseCeiling('notes:*, tasks:read')).toEqual(['notes:*', 'tasks:read']);
+    expect(parseCeiling('notes:* tasks:read')).toEqual(['notes:*', 'tasks:read']);
+    expect(parseCeiling('  ')).toEqual(['*']);
   });
 });

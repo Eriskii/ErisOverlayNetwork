@@ -52,3 +52,17 @@ export const deny = (bearer: string, id: string) =>
   call<Outcome>('POST', `./api/approvals/${encodeURIComponent(id)}/deny`, bearer);
 
 export const add = (bearer: string) => call<Added>('POST', './api/devices', bearer);
+
+export const join = (bearer: string, ticket: string, name: string, ceiling: string[]) =>
+  call<Outcome>('POST', './api/join', bearer, { ticket, name, ceiling });
+
+/** A ticket handed over in the fragment as `join=`, taken out of the address bar. */
+export function ticketFromFragment(): string | null {
+  const params = new URLSearchParams(location.hash.replace(/^#/, ''));
+  const ticket = params.get('join');
+  if (!ticket) return null;
+  params.delete('join');
+  const rest = params.toString();
+  history.replaceState(history.state, '', `${location.pathname}${location.search}${rest ? `#${rest}` : ''}`);
+  return ticket;
+}

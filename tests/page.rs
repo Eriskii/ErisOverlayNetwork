@@ -128,3 +128,79 @@ async fn the_page_shows_a_ticket_for_a_new_device() {
     assert!(added["svg"].as_str().unwrap().contains("<svg"), "{added}");
     assert!(added["expires"].as_i64().unwrap() > 0);
 }
+
+/// A device with no terminal joins from its page: paste the ticket, compare
+/// the fingerprint, and it serves apps once the join is approved.
+#[tokio::test]
+async fn a_device_joins_from_its_page() {
+    let core = Core::start().await;
+    let mut device = Device::new();
+    device.serve().await;
+    let (base, token) = page(&device);
+    let http = reqwest::Client::new();
+    let state = |http: reqwest::Client, base: String, token: String| async move {
+        http.get(format!("{base}/api/state"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap()
+    };
+    assert_eq!(state(http.clone(), base.clone(), token.clone()).await["device"]["joined"], false);
+
+    let ((id, code), _) = core.cut_raw().await;
+    let join = json!({"ticket": core.ticket(&code), "name": "Phone", "ceiling": ["notes:*"]});
+    assert_eq!(http.post(format!("{base}/api/join")).json(&join).send().await.unwrap().status(), 401);
+    let started: serde_json::Value = http
+        .post(format!("{base}/api/join"))
+        .bearer_auth(&token)
+        .json(&join)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(started, json!({"ok": true}));
+
+    core.await_requested(&id).await;
+    let (_, session) = core.root.get(&format!("/v1/pairings/{id}")).await;
+    let shown = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let now = state(http.clone(), base.clone(), token.clone()).await;
+            if now["joining"]["fingerprint"].is_string() {
+                return now;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(shown["joining"]["fingerprint"], session["body"]["fingerprint"], "the page shows the code to compare");
+    assert_eq!(core.root.post(&format!("/v1/pairings/{id}/approve"), json!({})).await.0, 200);
+
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while state(http.clone(), base.clone(), token.clone()).await["device"]["joined"] != true {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("the device never became joined");
+    let now = state(http.clone(), base.clone(), token.clone()).await;
+    assert_eq!(now["device"]["name"], "Phone");
+    assert!(now["joining"].is_null(), "{now}");
+
+    // And it works without a restart: an app signs in through it.
+    let app = App::new("Notes");
+    let mut asking = agent::connect_to(&device.socket()).await.unwrap().unwrap();
+    let ticket = asking.ask(&app.ask(&["notes:read"])).await.unwrap();
+    let _client = app.redeem(&ticket, &["notes:read"], app.key).await;
+    let approval = device.asked().await;
+    assert_eq!(
+        device.say(json!({"op": "decide", "id": approval["id"], "granted": ["notes:read"]})).await,
+        json!({"ok": true})
+    );
+    assert_eq!(asking.answer().await.unwrap(), Answer::Approved(vec!["notes:read".into()]));
+}

@@ -86,9 +86,26 @@ struct Pending {
     decided: Option<Decision>,
 }
 
+/// This device's standing with ErisDB, once it has joined.
+#[derive(Clone)]
+pub struct Standing {
+    pub db: Arc<erisdb_client::Client>,
+    pub joined: Joined,
+}
+
+/// A join the person started on the page, until it ends.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Joining {
+    /// The code to compare with the approving screen, once ErisDB has it.
+    pub fingerprint: Option<String>,
+    /// Why the join failed, if it did.
+    pub error: Option<String>,
+}
+
 pub struct Agent {
-    db: Option<Arc<erisdb_client::Client>>,
-    joined: Option<Joined>,
+    paths: super::Paths,
+    standing: std::sync::RwLock<Option<Standing>>,
+    joining: Mutex<Option<Joining>>,
     notify: bool,
     /// The approval page's link, once it is listening.
     page: std::sync::OnceLock<String>,
@@ -106,10 +123,11 @@ fn failed(error: &str, message: impl Into<String>) -> Outcome {
 }
 
 impl Agent {
-    pub fn new(db: Option<Arc<erisdb_client::Client>>, joined: Option<Joined>, notify: bool) -> Arc<Self> {
+    pub fn new(paths: super::Paths, notify: bool) -> Arc<Self> {
         Arc::new(Agent {
-            db,
-            joined,
+            paths,
+            standing: std::sync::RwLock::new(None),
+            joining: Mutex::new(None),
             notify,
             page: std::sync::OnceLock::new(),
             held: tokio::sync::Mutex::new(None),
@@ -122,10 +140,75 @@ impl Agent {
         let _ = self.page.set(link);
     }
 
+    pub fn standing(&self) -> Option<Standing> {
+        self.standing.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Take up this device's standing with ErisDB: dial it, and start
+    /// pairing this device's ErisFiles with the other devices.
+    pub async fn stand(&self, joined: Joined) -> anyhow::Result<()> {
+        let db = Arc::new(joined.dial(&self.paths).await?);
+        if let Some(peering) = super::peering::Peering::new(db.clone(), joined.clone()) {
+            tokio::spawn(peering.run());
+        }
+        *self.standing.write().unwrap_or_else(|e| e.into_inner()) = Some(Standing { db, joined });
+        *self.held.lock().await = None;
+        self.changed();
+        Ok(())
+    }
+
+    /// The join the person started on the page, while it lasts.
+    pub fn joining(&self) -> Option<Joining> {
+        self.joining.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn set_joining(&self, joining: Option<Joining>) {
+        *self.joining.lock().unwrap_or_else(|e| e.into_inner()) = joining;
+        self.changed();
+    }
+
+    /// Join ErisDB from the page with a ticket, as `erisauth join` does:
+    /// `{"ok": true}` once it is asking, then [`Agent::joining`] shows the
+    /// fingerprint until someone approves and the device stands joined.
+    pub async fn join(self: &Arc<Self>, ticket: String, name: String, ceiling: Vec<String>) -> Outcome {
+        if self.standing().is_some() {
+            return failed("already_joined", "this device has joined ErisDB already");
+        }
+        if self.joining().is_some_and(|j| j.error.is_none()) {
+            return failed("joining", "this device is already joining");
+        }
+        let name = name.trim().to_string();
+        if name.is_empty() || name.len() > 64 || name.chars().any(char::is_control) {
+            return failed("bad_name", "name this device in 1 to 64 printable characters");
+        }
+        let ceiling = if ceiling.is_empty() { vec!["*".to_string()] } else { ceiling };
+        if let Err(e) = permission::check_grants(&ceiling) {
+            return failed("bad_grants", e.to_string());
+        }
+        let asking = match super::begin_join(&self.paths, &ticket, &name, &ceiling).await {
+            Ok(asking) => asking,
+            Err(e) => return failed("cannot_join", format!("{e:#}")),
+        };
+        self.set_joining(Some(Joining { fingerprint: Some(asking.fingerprint.clone()), error: None }));
+        let agent = self.clone();
+        tokio::spawn(async move {
+            let outcome = match asking.finish(&agent.paths).await {
+                Ok((joined, _)) => agent.stand(joined).await,
+                Err(e) => Err(e),
+            };
+            match outcome {
+                Ok(()) => agent.set_joining(None),
+                Err(e) => agent.set_joining(Some(Joining { fingerprint: None, error: Some(format!("{e:#}")) })),
+            }
+        });
+        json!({"ok": true})
+    }
+
     /// This device, as the page shows it: its name, whether it has joined
     /// ErisDB, and the grants it holds.
     pub async fn device(&self) -> Value {
-        let grants = match &self.db {
+        let standing = self.standing();
+        let grants = match standing.as_ref().map(|s| &s.db) {
             Some(db) => {
                 let mut held = self.held.lock().await;
                 match &*held {
@@ -141,7 +224,8 @@ impl Agent {
             }
             None => Vec::new(),
         };
-        json!({"name": self.joined.as_ref().map(|j| &j.name), "joined": self.joined.is_some(), "grants": grants})
+        let joined = standing.as_ref().map(|s| &s.joined);
+        json!({"name": joined.map(|j| &j.name), "joined": joined.is_some(), "grants": grants})
     }
 
     fn pending(&self) -> std::sync::MutexGuard<'_, BTreeMap<Uuid, Pending>> {
@@ -166,8 +250,10 @@ impl Agent {
 
     /// Cut a pairing at ErisDB: its id, a ticket naming ErisDB, and when it expires.
     async fn cut(&self) -> Result<(Uuid, String, i64), String> {
-        let (Some(db), Some(joined)) = (&self.db, &self.joined) else {
-            return Err("this device has not joined ErisDB; run `erisauth join` first".into());
+        let Some(Standing { db, joined }) = self.standing() else {
+            return Err(
+                "this device has not joined ErisDB; join it with `erisauth join` or on its ErisAuth page".into()
+            );
         };
         let (status, cut) = db
             .request("POST", "/v1/pairings", Some(json!({"ttl_secs": TICKET_SECS})))
@@ -279,13 +365,15 @@ impl Agent {
     }
 
     async fn deny_at_erisdb(&self, id: Uuid) {
-        if let Some(db) = &self.db {
+        if let Some(Standing { db, .. }) = self.standing() {
             let _ = db.request("POST", &format!("/v1/pairings/{id}/deny"), Some(json!({}))).await;
         }
     }
 
     async fn settle(self: &Arc<Self>, id: Uuid) -> Decision {
-        let Some(db) = &self.db else { return Decision::Denied("this device has not joined ErisDB".into()) };
+        let Some(Standing { db, .. }) = self.standing() else {
+            return Decision::Denied("this device has not joined ErisDB".into());
+        };
         let Some(mut ask) = self.pending().get(&id).map(|p| p.approval.clone()) else {
             return Decision::Denied("the request is gone".into());
         };
@@ -378,7 +466,9 @@ impl Agent {
     /// The person approves `granted` for request `id`, with the passphrase
     /// when it asks for more than this device may approve by itself.
     pub async fn approve(&self, id: Uuid, granted: Vec<String>, passphrase: Option<String>) -> Outcome {
-        let Some(db) = &self.db else { return failed("not_joined", "this device has not joined ErisDB") };
+        let Some(Standing { db, .. }) = self.standing() else {
+            return failed("not_joined", "this device has not joined ErisDB");
+        };
         let Some(approval) = self.waiting(id) else {
             return failed("no_such_request", "nothing is waiting for an answer under that id");
         };

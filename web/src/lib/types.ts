@@ -24,6 +24,8 @@ export interface Approval {
 export interface State {
   device: { name: string | null; joined: boolean; grants: string[] };
   approvals: Approval[];
+  /** A join started on this page, until it ends. */
+  joining: { fingerprint: string | null; error: string | null } | null;
 }
 
 /** A decision's answer: `{ok: true}`, or why not. */

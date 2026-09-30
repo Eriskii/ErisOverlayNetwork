@@ -3,6 +3,7 @@
   import * as api from '$lib/api';
   import AddDevice from '$lib/components/AddDevice.svelte';
   import ApprovalCard from '$lib/components/ApprovalCard.svelte';
+  import JoinForm from '$lib/components/JoinForm.svelte';
   import type { State } from '$lib/types';
 
   let bearer = $state<string | null>(null);
@@ -10,6 +11,8 @@
   let problem = $state<'token' | 'unreachable' | null>(null);
   let now = $state(Date.now() / 1000);
   let answered = $state(new Set<string>());
+  /** A ticket handed to this page to join with, as a phone's link to it does. */
+  let handed = $state<string | null>(null);
 
   const approvals = $derived((current?.approvals ?? []).filter((a) => !answered.has(a.id)));
 
@@ -29,9 +32,11 @@
   }
 
   onMount(() => {
+    handed = api.ticketFromFragment();
     bearer = api.token();
     void refresh();
     const adopt = () => {
+      handed = api.ticketFromFragment() ?? handed;
       bearer = api.token();
       void refresh();
     };
@@ -71,16 +76,15 @@
       <h2>ErisAuth is not answering</h2>
       <p>Start it with <code>erisauth serve</code>; this page reconnects by itself.</p>
     </section>
-  {:else if current && !current.device.joined}
-    <section class="note">
-      <h2>This device has not joined ErisDB</h2>
-      <p>Cut a ticket with <code>erisdb pair</code>, then run <code>erisauth join 'erisdb://pair/…'</code>.</p>
-    </section>
+  {:else if current && !current.device.joined && bearer}
+    {#key handed}
+      <JoinForm {bearer} joining={current.joining} ticket={handed} />
+    {/key}
   {:else if current && !approvals.length}
     <section class="note quiet">
       <h2>Nothing is waiting</h2>
       <p>When an app on this device asks to sign in, or a new device asks to join, it shows up here.</p>
-      <p class="faint">Approves by itself: {current.device.grants.filter((g) => !g.startsWith('meta:') && !g.startsWith('erisauth:')).join(', ') || 'nothing; everything takes the passphrase'}</p>
+      <p class="faint">Approves by itself: {current.device.grants.filter((g) => !g.startsWith('meta:') && !g.startsWith('erisauth')).join(', ') || 'nothing; everything takes the passphrase'}</p>
     </section>
   {:else if current && bearer}
     <section class="approvals">

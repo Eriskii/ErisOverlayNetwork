@@ -37,3 +37,9 @@ export function takeToken(hash: string): { token: string | null; hash: string } 
   const rest = params.toString();
   return { token, hash: rest ? `#${rest}` : '' };
 }
+
+/** A ceiling as typed: grants separated by commas or spaces; nothing typed means everything. */
+export function parseCeiling(typed: string): string[] {
+  const grants = typed.split(/[\s,]+/).filter(Boolean);
+  return grants.length ? grants : ['*'];
+}

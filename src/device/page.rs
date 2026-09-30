@@ -11,6 +11,7 @@
 //! POST /api/approvals/{id}/approve  {granted, passphrase?} → {ok: true} or {error, message}
 //! POST /api/approvals/{id}/deny     → {ok: true} or {error, message}
 //! POST /api/devices                 → {id, ticket, svg, expires}: a ticket a new device joins with
+//! POST /api/join                    {ticket, name, ceiling?} → {ok: true}; `joining` in the state follows it
 //! ```
 
 use std::path::Path;
@@ -71,6 +72,7 @@ pub async fn listen(
         .route("/api/approvals/{id}/approve", post(approve))
         .route("/api/approvals/{id}/deny", post(deny))
         .route("/api/devices", post(add))
+        .route("/api/join", post(join))
         .route_layer(middleware::from_fn_with_state(page.clone(), authorize))
         .with_state(page);
     let app = Router::new()
@@ -103,7 +105,11 @@ async fn authorize(State(page): State<Page>, request: Request, next: Next) -> Re
 }
 
 async fn state(State(page): State<Page>) -> Json<serde_json::Value> {
-    Json(json!({"device": page.agent.device().await, "approvals": page.agent.approvals()}))
+    Json(json!({
+        "device": page.agent.device().await,
+        "approvals": page.agent.approvals(),
+        "joining": page.agent.joining(),
+    }))
 }
 
 #[derive(Deserialize)]
@@ -123,6 +129,18 @@ async fn approve(
 
 async fn deny(State(page): State<Page>, UrlPath(id): UrlPath<Uuid>) -> Json<serde_json::Value> {
     Json(page.agent.deny(id))
+}
+
+#[derive(Deserialize)]
+struct Join {
+    ticket: String,
+    name: String,
+    #[serde(default)]
+    ceiling: Vec<String>,
+}
+
+async fn join(State(page): State<Page>, Json(body): Json<Join>) -> Json<serde_json::Value> {
+    Json(page.agent.join(body.ticket, body.name, body.ceiling).await)
 }
 
 async fn add(State(page): State<Page>) -> Json<serde_json::Value> {

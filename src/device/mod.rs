@@ -1,7 +1,7 @@
 //! ErisAuth on a device.
 //!
 //! A device joins ErisDB once, as an installation of its own over Iroh
-//! ([`join`]). It asks for the right to open and approve pairings, to ask
+//! ([`begin_join`], from the command line or the page). It asks for the right to open and approve pairings, to ask
 //! home, and for a ceiling: the grants it may approve for an app by itself.
 //! [`serve`] then listens where apps look for it and puts their requests
 //! to the person.
@@ -114,15 +114,19 @@ pub fn installation_name(name: &str) -> String {
     format!("ErisAuth on {name}")
 }
 
-/// Join the ErisDB a ticket names, asking for [`BASE`] and `ceiling`.
-/// `said` hears what to show the person while someone approves.
-pub async fn join(
-    paths: &Paths,
-    ticket: &str,
-    name: &str,
-    ceiling: &[String],
-    mut said: impl FnMut(&str),
-) -> Result<Joined> {
+/// A request to join ErisDB, redeemed and waiting for someone to approve it.
+pub struct Asking {
+    client: erisdb_client::Client,
+    addr: iroh::EndpointAddr,
+    name: String,
+    expires: i64,
+    /// The code both screens show, to compare.
+    pub fingerprint: String,
+}
+
+/// Redeem a ticket for ErisDB, asking for [`BASE`] and `ceiling` as this
+/// device, named `name`. The request then waits for [`Asking::finish`].
+pub async fn begin_join(paths: &Paths, ticket: &str, name: &str, ceiling: &[String]) -> Result<Asking> {
     let ticket = erislogin::ticket::Ticket::parse("erisdb", ticket)?;
     let addr = ticket.endpoint_addr().context("this ticket has no endpoint id; ErisAuth reaches ErisDB over Iroh")?;
     let key = erislogin::key::load_or_create(&paths.key())?;
@@ -131,27 +135,31 @@ pub async fn join(
         erisdb_client::Client::dial_addr(addr.clone(), &ticket.token, &installation, Some(key.to_bytes())).await?;
     let requested: Vec<&str> = BASE.iter().copied().chain(ceiling.iter().map(String::as_str)).collect();
     let session = client.redeem_pairing(&installation, &requested).await?;
-    let fingerprint = session["body"]["fingerprint"].as_str().context("ErisDB sent no fingerprint")?;
-    said(&format!("Compare this code with the approving screen: {fingerprint}"));
-    said(&format!("{installation} asks to approve apps for: {}", ceiling.join(", ")));
-
+    let fingerprint = session["body"]["fingerprint"].as_str().context("ErisDB sent no fingerprint")?.to_string();
     let expires = session["body"]["expires"].as_i64().unwrap_or(erislogin::now() + 600);
-    let within = Duration::from_secs(expires.saturating_sub(erislogin::now()).max(1) as u64);
-    match client.await_pairing(within, &erisdb_client::Cancel::new()).await? {
-        erisdb_client::Pairing::Approved { token, granted } => {
-            let joined = Joined {
-                name: name.to_string(),
-                eid: addr.id.to_string(),
-                addrs: addr.ip_addrs().copied().collect(),
-                token,
-            };
-            joined.save(paths)?;
-            said(&format!("Joined. This device holds: {}", granted.join(", ")));
-            Ok(joined)
+    Ok(Asking { client, addr, name: name.to_string(), expires, fingerprint })
+}
+
+impl Asking {
+    /// Wait for the answer; once approved, save the standing and return it
+    /// with the grants this device holds.
+    pub async fn finish(self, paths: &Paths) -> Result<(Joined, Vec<String>)> {
+        let within = Duration::from_secs(self.expires.saturating_sub(erislogin::now()).max(1) as u64);
+        match self.client.await_pairing(within, &erisdb_client::Cancel::new()).await? {
+            erisdb_client::Pairing::Approved { token, granted } => {
+                let joined = Joined {
+                    name: self.name,
+                    eid: self.addr.id.to_string(),
+                    addrs: self.addr.ip_addrs().copied().collect(),
+                    token,
+                };
+                joined.save(paths)?;
+                Ok((joined, granted))
+            }
+            erisdb_client::Pairing::Denied => bail!("the request to join was denied"),
+            erisdb_client::Pairing::TimedOut => bail!("nobody approved the request to join in time"),
+            other => bail!("joining ended without an answer: {other:?}"),
         }
-        erisdb_client::Pairing::Denied => bail!("the request to join was denied"),
-        erisdb_client::Pairing::TimedOut => bail!("nobody approved the request to join in time"),
-        other => bail!("joining ended without an answer: {other:?}"),
     }
 }
 
@@ -165,17 +173,10 @@ pub fn page_link(paths: &Paths) -> Result<String> {
 /// Listen for apps and for the person, on the socket and the approval page,
 /// until the process ends.
 pub async fn serve(paths: &Paths, notify: bool) -> Result<()> {
-    let joined = Joined::load(paths)?;
-    let db = match &joined {
-        Some(joined) => Some(std::sync::Arc::new(joined.dial(paths).await?)),
-        None => None,
-    };
-    if let (Some(db), Some(joined)) = (&db, &joined)
-        && let Some(peering) = peering::Peering::new(db.clone(), joined.clone())
-    {
-        tokio::spawn(peering.run());
+    let agent = agent::Agent::new(paths.clone(), notify);
+    if let Some(joined) = Joined::load(paths)? {
+        agent.stand(joined).await?;
     }
-    let agent = agent::Agent::new(db, joined, notify);
     // The socket first: a daemon that cannot take it publishes no page link.
     let listener = socket::bind(&paths.socket())?;
     let (link, page) = page::listen(&paths.runtime, agent.clone()).await?;

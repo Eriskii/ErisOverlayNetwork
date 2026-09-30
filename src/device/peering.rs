@@ -123,12 +123,20 @@ pub struct Peering {
     me: Uuid,
     /// ErisFiles ids this device has an invitation open for.
     inviting: std::sync::Mutex<HashSet<String>>,
+    /// Whether both facets are known to be registered, which is asked once.
+    registered: std::sync::atomic::AtomicBool,
 }
 
 impl Peering {
     pub fn new(db: Arc<erisdb_client::Client>, joined: Joined) -> Option<Arc<Self>> {
         let me = installation(&joined.token)?;
-        Some(Arc::new(Peering { db, joined, me, inviting: std::sync::Mutex::new(HashSet::new()) }))
+        Some(Arc::new(Peering {
+            db,
+            joined,
+            me,
+            inviting: std::sync::Mutex::new(HashSet::new()),
+            registered: std::sync::atomic::AtomicBool::new(false),
+        }))
     }
 
     /// Keep this device's announcement current and its peers paired, until
@@ -157,7 +165,10 @@ impl Peering {
     }
 
     async fn round(self: &Arc<Self>) -> Result<()> {
-        register(&self.db).await?;
+        if !self.registered.load(std::sync::atomic::Ordering::Relaxed) {
+            register(&self.db).await?;
+            self.registered.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         let files = Files::find().await;
         let mine = files.as_ref().map(|(_, id)| id.clone());
         let devices = self.announced().await?;

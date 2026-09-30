@@ -16,7 +16,11 @@ A device joins ErisDB once, as an installation of its own over Iroh:
 erisauth join --name laptop --ceiling 'notes:*' --ceiling 'tasks:*' 'erisdb://pair/…'
 ```
 
-Cut the ticket with `erisdb pair`, compare the fingerprint, and approve. The device asks for the
+Cut the ticket with `erisdb pair`, or show one on a device that has joined (below), compare the
+fingerprint, and approve. A device without a terminal joins from its approval page instead: a daemon
+that has not joined shows a form for the ticket, a name and the ceiling, then the fingerprint, and
+becomes a working device once someone approves. A link to the page carrying `&join=<ticket>` in its
+fragment fills the ticket in. The device asks for the
 right to open and approve pairings, to ask [home](#home), and to announce itself to and invite the
 other devices, plus its ceiling: the grants it may
 approve for an app by itself. Without `--ceiling` the ceiling is everything (`*`). Its key and

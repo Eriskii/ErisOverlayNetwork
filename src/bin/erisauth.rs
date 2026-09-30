@@ -117,7 +117,11 @@ async fn main() -> Result<()> {
                     .unwrap_or_else(|_| "this device".into()),
             };
             let ceiling = if ceiling.is_empty() { vec!["*".to_string()] } else { ceiling };
-            device::join(&paths, &ticket, &name, &ceiling, |line| println!("{line}")).await?;
+            let asking = device::begin_join(&paths, &ticket, &name, &ceiling).await?;
+            println!("Compare this code with the approving screen: {}", asking.fingerprint);
+            println!("{} asks to approve apps for: {}", device::installation_name(&name), ceiling.join(", "));
+            let (_, granted) = asking.finish(&paths).await?;
+            println!("Joined. This device holds: {}", granted.join(", "));
         }
         Command::Serve { no_notify } => device::serve(&device::Paths::from_env()?, !no_notify).await?,
         Command::Add => device::prompt::add(&device::Paths::from_env()?).await?,
