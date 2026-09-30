@@ -30,6 +30,9 @@
   const needs = $derived(needsPassphrase(device, granted));
   const beyond = (grant: string) => !device.some((held) => covers(held, grant));
   const service = $derived(approval.service === 'erisdb' ? 'ErisDB' : approval.service);
+  const signer = $derived(
+    approval.certificate ? `${approval.certificate.slice(0, 8)}…${approval.certificate.slice(-8)}` : 'unknown',
+  );
   const key = $derived(
     approval.identity ? `${approval.identity.key.slice(0, 8)}…${approval.identity.key.slice(-6)}` : 'unknown',
   );
@@ -89,8 +92,15 @@
       </div>
     {:else}
       <dl>
-        <dt>program</dt>
-        <dd><code>{approval.executable ?? 'unknown'}</code>{#if approval.pid}<span class="faint pid">pid {approval.pid}</span>{/if}</dd>
+        {#if approval.package}
+          <dt>app</dt>
+          <dd><code>{approval.package}</code></dd>
+          <dt>signed</dt>
+          <dd><code title={approval.certificate ?? ''}>{signer}</code></dd>
+        {:else}
+          <dt>program</dt>
+          <dd><code>{approval.executable ?? 'unknown'}</code>{#if approval.pid}<span class="faint pid">pid {approval.pid}</span>{/if}</dd>
+        {/if}
         <dt>key</dt>
         <dd><code title={approval.identity?.key}>{approval.identity?.kind} {key}</code></dd>
       </dl>

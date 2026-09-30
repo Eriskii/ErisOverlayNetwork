@@ -5,6 +5,13 @@ use super::agent::Approval;
 
 /// Show that `approval` is waiting. A desktop without a notification
 /// service still has the page and the prompt; failing to notify is only logged.
+/// On Android the app posts its own notifications.
+#[cfg(not(target_os = "linux"))]
+pub fn asked(_approval: &Approval, _page: Option<String>) {}
+
+/// Show that `approval` is waiting. A desktop without a notification
+/// service still has the page and the prompt; failing to notify is only logged.
+#[cfg(target_os = "linux")]
 pub fn asked(approval: &Approval, page: Option<String>) {
     let summary = format!("{} asks to sign in", approval.client);
     let program =

@@ -61,7 +61,7 @@ pub async fn serve(listener: UnixListener, agent: Arc<Agent>) -> Result<()> {
 fn peer(stream: &UnixStream) -> Peer {
     let pid = stream.peer_cred().ok().and_then(|cred| cred.pid());
     let executable = pid.and_then(|pid| std::fs::read_link(format!("/proc/{pid}/exe")).ok());
-    Peer { pid, executable }
+    Peer { pid, executable, ..Peer::default() }
 }
 
 async fn send(write: &mut OwnedWriteHalf, value: &impl serde::Serialize) -> Result<()> {

@@ -17,6 +17,9 @@ export interface Approval {
   essential: string[];
   pid: number | null;
   executable: string | null;
+  /** On Android: the package asking, and the SHA-256 of its signing certificate. */
+  package: string | null;
+  certificate: string | null;
   needs_passphrase: boolean;
   expires: number;
 }

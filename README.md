@@ -85,6 +85,40 @@ the ErisFiles key the invitee announced. Anything else is dropped. Holding `eris
 what lets an installation announce a device the others will share files with, and only ErisAuth devices
 ask for it.
 
+## On Android
+
+The app `dev.eris.auth` (in `android/`) runs the same daemon in its own process and shows the
+approval page in a WebView. A phone joins from that page, or by opening an `erisdb://pair/…` ticket
+with the camera, which fills the page's join form in.
+
+Android apps cannot reach one another's sockets, so apps bind ErisAuth's service instead, with the
+`dev.eris.auth.SIGN_IN` action. Android tells the service which app is calling: the page and the
+notification show its package and the SHA-256 of its signing certificate, not a name the app chose.
+The conversation is the socket's: ask, receive the ticket, redeem it with the app's own key, hear
+the answer. An app that goes away withdraws its request, and only the app that opened a request can
+withdraw it.
+
+Apps use the client library in `android/client`:
+
+```kotlin
+ErisAuth.connect(context) { erisAuth ->
+    if (erisAuth == null) return@connect showScanOrPaste()   // no ErisAuth here: pair by ticket
+    erisAuth.ask("erisdb", "Notes", listOf("notes:read"), ErisAuth.Identity.iroh(keyHex), object : ErisAuth.Listener {
+        override fun onTicket(ticket: String) = redeemWithMyKey(ticket)
+        override fun onAnswer(answer: ErisAuth.Answer) = if (answer is ErisAuth.Answer.Approved) collect() else fail()
+    })
+}
+```
+
+Its manifest declares the `<queries>` entry an app needs to see ErisAuth. The calls are written out
+as Binder transactions in `Wire.kt` rather than generated from AIDL, so the client and the service
+share one definition. The app does not pair ErisFiles: ErisFiles on Android is another app, whose
+state ErisAuth cannot read.
+
+Build it with `scripts/build-android.sh`, which needs the Android SDK and NDK, `cargo-ndk`, and the
+`aarch64-linux-android` and `x86_64-linux-android` Rust targets. It builds the page and the JNI
+library for both, runs the Kotlin unit tests, and assembles the debug APK.
+
 ## Home
 
 Home is ErisAuth's plugin in [ErisDB](https://github.com/Eriskii/ErisDB). It is an ErisDB
@@ -152,6 +186,7 @@ build needs Node 22+ and npm.
 ```sh
 cargo test
 (cd web && npm run check && npm test)
+./android/gradlew -p android testDebugUnitTest   # after scripts/build-android.sh has built the library
 ```
 
 The suite runs a real Postgres (Docker), a real ErisDB core serving the shipped manifest over HTTP

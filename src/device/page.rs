@@ -58,7 +58,7 @@ pub fn link_path(runtime: &Path) -> std::path::PathBuf {
 pub async fn listen(
     runtime: &Path,
     agent: Arc<Agent>,
-) -> Result<(String, impl std::future::Future<Output = Result<()>>)> {
+) -> Result<(String, impl std::future::Future<Output = Result<()>> + use<>)> {
     let token = B64.encode(rand::random::<[u8; 32]>());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.context("binding the approval page")?;
     let link = format!("http://{}/#token={token}", listener.local_addr()?);

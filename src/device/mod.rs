@@ -7,6 +7,7 @@
 //! to the person.
 
 pub mod agent;
+pub mod mobile;
 pub mod notify;
 pub mod page;
 pub mod peering;

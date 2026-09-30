@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "erisauth-android"]
+resolver = "3"
+
 [package]
 name = "erisauth"
 version = "0.1.0"
@@ -17,7 +21,6 @@ clap = { version = "4", features = ["derive"] }
 erisdb-client = { git = "https://github.com/Eriskii/ErisDB", rev = "f19a3aa3f371675036b36e01aaff8007a74df630" }
 erislogin = { git = "https://github.com/Eriskii/ErisLogin", tag = "v0.4.1" }
 iroh = "1"
-notify-rust = "4"
 rand = "0.9"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rpassword = "7"
@@ -28,9 +31,16 @@ subtle = "2"
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+notify-rust = "4"
+
 [dev-dependencies]
 erisfiles = { git = "https://github.com/Eriskii/ErisFiles", rev = "a55afd1829c51a393880d6864cde5e491c37912f" }
 erisdb = { git = "https://github.com/Eriskii/ErisDB", rev = "f19a3aa3f371675036b36e01aaff8007a74df630" }
 sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "postgres"] }
 tempfile = "3"
 testcontainers-modules = { version = "0.15", features = ["postgres"] }
+
+[profile.release]
+# The Android library ships in the APK; its dynamic symbols, the JNI entry points, stay.
+strip = "symbols"

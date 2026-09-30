@@ -33,11 +33,20 @@ pub const TICKET_SECS: i64 = 600;
 /// How often the device looks to see whether a ticket has been redeemed.
 const POLL: Duration = Duration::from_millis(250);
 
-/// Who is asking, as the kernel says.
-#[derive(Debug, Clone, Default, Serialize)]
+/// Who is asking, as the operating system says: the kernel on Linux, the
+/// package manager on Android.
+#[derive(Debug, Clone, Default, Serialize, serde::Deserialize)]
 pub struct Peer {
+    #[serde(default)]
     pub pid: Option<i32>,
+    #[serde(default)]
     pub executable: Option<PathBuf>,
+    /// The Android package asking.
+    #[serde(default)]
+    pub package: Option<String>,
+    /// The SHA-256 of that package's signing certificate, in hex.
+    #[serde(default)]
+    pub certificate: Option<String>,
 }
 
 /// Who is asking.
@@ -68,6 +77,8 @@ pub struct Approval {
     pub essential: Vec<String>,
     pub pid: Option<i32>,
     pub executable: Option<PathBuf>,
+    pub package: Option<String>,
+    pub certificate: Option<String>,
     /// True when the request asks for more than this device may approve by itself.
     pub needs_passphrase: bool,
     pub expires: i64,
@@ -296,6 +307,8 @@ impl Agent {
             essential: Vec::new(),
             pid: None,
             executable: None,
+            package: None,
+            certificate: None,
             needs_passphrase: false,
             expires,
         };
@@ -332,6 +345,8 @@ impl Agent {
             essential: Vec::new(),
             pid: peer.pid,
             executable: peer.executable,
+            package: peer.package,
+            certificate: peer.certificate,
             needs_passphrase: false,
             expires,
         };
@@ -381,6 +396,9 @@ impl Agent {
         loop {
             if erislogin::now() >= ask.expires {
                 return Decision::Denied("the ticket expired before it was redeemed".into());
+            }
+            if !self.pending().contains_key(&id) {
+                return Decision::Denied("the app withdrew its request".into());
             }
             let session = match db.request("GET", &format!("/v1/pairings/{id}"), None).await {
                 Ok((200, session)) => session,
@@ -441,14 +459,37 @@ impl Agent {
             super::notify::asked(&shown, self.page.get().cloned());
         }
         loop {
-            if let Some(decision) = self.pending().get_mut(&id).and_then(|p| p.decided.take()) {
-                return decision;
+            match self.pending().get_mut(&id) {
+                None => return Decision::Denied("the app withdrew its request".into()),
+                Some(pending) => {
+                    if let Some(decision) = pending.decided.take() {
+                        return decision;
+                    }
+                }
             }
             let left = ask.expires.saturating_sub(erislogin::now());
             if left <= 0 {
                 return Decision::Denied("nobody answered in time".into());
             }
             let _ = tokio::time::timeout(Duration::from_secs(left as u64), changes.changed()).await;
+        }
+    }
+
+    /// Wait up to `within` for request `id` to reach the person: its
+    /// approval once it does, `None` if it ends first or time runs out.
+    pub async fn asked(&self, id: Uuid, within: Duration) -> Option<Approval> {
+        let mut changes = self.subscribe();
+        let deadline = tokio::time::Instant::now() + within;
+        loop {
+            if let Some(waiting) = self.waiting(id) {
+                return Some(waiting);
+            }
+            if !self.pending().contains_key(&id) {
+                return None;
+            }
+            if tokio::time::timeout_at(deadline, changes.changed()).await.is_err() {
+                return None;
+            }
         }
     }
 

@@ -1438,6 +1438,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "erisauth-android"
+version = "0.1.0"
+dependencies = [
+ "erisauth",
+ "jni 0.21.1",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "erisdb"
 version = "0.1.0"
 source = "git+https://github.com/Eriskii/ErisDB?rev=f19a3aa3f371675036b36e01aaff8007a74df630#f19a3aa3f371675036b36e01aaff8007a74df630"

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- An app sees ErisAuth only if it says it looks for it. -->
+    <queries>
+        <package android:name="dev.eris.auth" />
+    </queries>
+</manifest>
