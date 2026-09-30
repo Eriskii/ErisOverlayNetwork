@@ -54,6 +54,7 @@ fn a_ticket_without_addrs_encodes_as_it_always_has() {
 }
 
 #[test]
+#[cfg(feature = "iroh")]
 fn a_ticket_gives_the_address_to_dial() {
     let ticket = Ticket::new("code".into(), Some(EID.into()), None, None)
         .unwrap()

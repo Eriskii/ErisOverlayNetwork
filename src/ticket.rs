@@ -102,6 +102,7 @@ impl Ticket {
     }
 
     /// The Iroh address to dial: the endpoint id and any direct addresses.
+    #[cfg(feature = "iroh")]
     pub fn endpoint_addr(&self) -> Option<iroh::EndpointAddr> {
         let id: iroh::EndpointId = self.eid.as_deref()?.parse().ok()?;
         Some(iroh::EndpointAddr::from_parts(id, self.addrs.iter().copied().map(iroh::TransportAddr::Ip)))

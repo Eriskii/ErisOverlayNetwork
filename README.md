@@ -5,8 +5,12 @@ newcomer scans it and asks for permissions, both screens show the same fingerpri
 approves all, some, or none of the request. Crate `erislogin`.
 
 ```toml
-erislogin = { git = "https://github.com/Eriskii/ErisLogin", tag = "v0.3.0" }
+erislogin = { git = "https://github.com/Eriskii/ErisLogin", tag = "v0.3.1" }
 ```
+
+Features `iroh` (`key`, `Ticket::endpoint_addr`), `qr` and `prompt` are on by default. A client
+that only reads tickets and signs or checks tokens can take `default-features = false` and leave
+Iroh, QR rendering and the terminal out of its build.
 
 | Module       | What it holds                                                                                 |
 | ------------ | --------------------------------------------------------------------------------------------- |

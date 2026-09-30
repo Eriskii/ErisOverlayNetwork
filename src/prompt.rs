@@ -60,7 +60,8 @@ pub fn stdin_lines() -> UnboundedReceiver<String> {
     rx
 }
 
-fn prompt(out: &mut impl Write, text: &str) -> Result<()> {
+/// Write `text` with no newline and flush it, as a prompt for the next line.
+pub fn prompt(out: &mut impl Write, text: &str) -> Result<()> {
     write!(out, "{text}")?;
     out.flush()?;
     Ok(())

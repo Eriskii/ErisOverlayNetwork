@@ -1,6 +1,6 @@
 [package]
 name = "erislogin"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 description = "Pairing devices and apps over Iroh: scannable tickets, fingerprint ceremonies, signed tokens, permissions, keys"
 license = "MIT"
@@ -9,22 +9,43 @@ readme = "README.md"
 keywords = ["iroh", "pairing", "qr", "capability", "auth"]
 categories = ["authentication", "network-programming"]
 
+[features]
+default = ["iroh", "qr", "prompt"]
+# Iroh keys (`key`) and dialable ticket addresses (`Ticket::endpoint_addr`).
+iroh = ["dep:iroh"]
+# Tickets as QR codes (`qr`).
+qr = ["dep:qrcode", "dep:png"]
+# The host's terminal ceremony (`prompt`).
+prompt = ["qr", "tokio/rt", "tokio/macros", "tokio/time", "tokio/signal"]
+
 [dependencies]
 base64 = "0.22"
 hmac = "0.12"
-iroh = "1"
-png = "0.18.1"
-qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
+iroh = { version = "1", optional = true }
+png = { version = "0.18.1", optional = true }
+qrcode = { version = "0.14.1", default-features = false, features = ["svg"], optional = true }
 rand = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 subtle = "2"
 thiserror = "2"
-tokio = { version = "1", features = ["rt", "macros", "sync", "time", "signal"] }
+tokio = { version = "1", features = ["sync"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
 rqrr = "0.10.1"
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+
+[[test]]
+name = "key"
+required-features = ["iroh"]
+
+[[test]]
+name = "qr"
+required-features = ["qr"]
+
+[[test]]
+name = "prompt"
+required-features = ["prompt"]

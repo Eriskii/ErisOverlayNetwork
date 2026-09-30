@@ -15,10 +15,13 @@
 
 pub mod error;
 pub mod identity;
+#[cfg(feature = "iroh")]
 pub mod key;
 pub mod pairing;
 pub mod permission;
+#[cfg(feature = "prompt")]
 pub mod prompt;
+#[cfg(feature = "qr")]
 pub mod qr;
 pub mod ticket;
 pub mod token;
