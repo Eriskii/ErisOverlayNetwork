@@ -11,8 +11,15 @@ use serde_json::{Value, json};
 use support::{App, Core, Device, PASSPHRASE};
 
 /// What a device asks for besides its ceiling.
-const BASE: &[&str] =
-    &["meta:pairing:create", "meta:pairing:read", "meta:pairing:approve", "erisauth:approve", "erisauth:passphrase"];
+const BASE: &[&str] = &[
+    "meta:pairing:create",
+    "meta:pairing:read",
+    "meta:pairing:approve",
+    "erisauth:approve",
+    "erisauth:passphrase",
+    "erisauth.devices:*",
+    "erisauth.mail:*",
+];
 
 async fn collect(client: &erisdb_client::Client) -> Vec<String> {
     match client.await_pairing(Duration::from_secs(30), &Cancel::new()).await.unwrap() {

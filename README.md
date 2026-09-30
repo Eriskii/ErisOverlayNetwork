@@ -17,7 +17,8 @@ erisauth join --name laptop --ceiling 'notes:*' --ceiling 'tasks:*' 'erisdb://pa
 ```
 
 Cut the ticket with `erisdb pair`, compare the fingerprint, and approve. The device asks for the
-right to open and approve pairings and to ask [home](#home), plus its ceiling: the grants it may
+right to open and approve pairings, to ask [home](#home), and to announce itself to and invite the
+other devices, plus its ceiling: the grants it may
 approve for an app by itself. Without `--ceiling` the ceiling is everything (`*`). Its key and
 standing live in `$XDG_DATA_HOME/erisauth/`.
 
@@ -63,6 +64,22 @@ The ticket crosses from one screen to another, so the person compares the finger
 approving, as with any ErisLogin pairing. What makes the newcomer an ErisAuth device is granted or
 refused whole; its ceiling can be narrowed. A ceiling beyond the approving device's own grants takes
 the passphrase, through home.
+
+### ErisFiles among your devices
+
+Devices in ErisAuth become [ErisFiles](https://github.com/Eriskii/ErisFiles) peers of one another with
+no ceremony of their own: approving a device into ErisAuth is the approval. Each device finds the
+ErisFiles running beside it (`$ERISFILES_HOME`, else `$XDG_DATA_HOME/erisfiles`) and announces itself
+in ErisDB's `erisauth.devices` facet: its installation, its name and its ErisFiles device id. Of two
+announced devices that are not yet peers, the one with the lower ErisFiles id opens a pairing on its
+ErisFiles and posts the ticket to the other in `erisauth.mail`.
+
+ErisFiles grants apply both ways, so joining a stranger's ticket would open this device's files to
+them. A device therefore joins an invitation only when ErisDB says its sender wrote it, the sender has
+announced itself, and the ticket is for the ErisFiles the sender announced; the inviter approves only
+the ErisFiles key the invitee announced. Anything else is dropped. Holding `erisauth.devices:create` is
+what lets an installation announce a device the others will share files with, and only ErisAuth devices
+ask for it.
 
 ## Home
 

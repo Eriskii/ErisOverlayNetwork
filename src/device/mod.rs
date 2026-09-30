@@ -9,6 +9,7 @@
 pub mod agent;
 pub mod notify;
 pub mod page;
+pub mod peering;
 pub mod prompt;
 pub mod socket;
 
@@ -19,9 +20,17 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-/// What a device holds besides its ceiling.
-pub const BASE: [&str; 5] =
-    ["meta:pairing:create", "meta:pairing:read", "meta:pairing:approve", "erisauth:approve", "erisauth:passphrase"];
+/// What a device holds besides its ceiling: opening and approving pairings,
+/// asking home, and announcing itself to and inviting the other devices.
+pub const BASE: [&str; 7] = [
+    "meta:pairing:create",
+    "meta:pairing:read",
+    "meta:pairing:approve",
+    "erisauth:approve",
+    "erisauth:passphrase",
+    "erisauth.devices:*",
+    "erisauth.mail:*",
+];
 
 /// Where a device keeps its key and its standing with ErisDB, and where it listens.
 #[derive(Debug, Clone)]
@@ -158,9 +167,14 @@ pub fn page_link(paths: &Paths) -> Result<String> {
 pub async fn serve(paths: &Paths, notify: bool) -> Result<()> {
     let joined = Joined::load(paths)?;
     let db = match &joined {
-        Some(joined) => Some(joined.dial(paths).await?),
+        Some(joined) => Some(std::sync::Arc::new(joined.dial(paths).await?)),
         None => None,
     };
+    if let (Some(db), Some(joined)) = (&db, &joined)
+        && let Some(peering) = peering::Peering::new(db.clone(), joined.clone())
+    {
+        tokio::spawn(peering.run());
+    }
     let agent = agent::Agent::new(db, joined, notify);
     // The socket first: a daemon that cannot take it publishes no page link.
     let listener = socket::bind(&paths.socket())?;

@@ -87,7 +87,7 @@ struct Pending {
 }
 
 pub struct Agent {
-    db: Option<erisdb_client::Client>,
+    db: Option<Arc<erisdb_client::Client>>,
     joined: Option<Joined>,
     notify: bool,
     /// The approval page's link, once it is listening.
@@ -106,7 +106,7 @@ fn failed(error: &str, message: impl Into<String>) -> Outcome {
 }
 
 impl Agent {
-    pub fn new(db: Option<erisdb_client::Client>, joined: Option<Joined>, notify: bool) -> Arc<Self> {
+    pub fn new(db: Option<Arc<erisdb_client::Client>>, joined: Option<Joined>, notify: bool) -> Arc<Self> {
         Arc::new(Agent {
             db,
             joined,

@@ -68,7 +68,9 @@ async fn a_trusted_device_adds_a_new_one_after_the_person_compares_fingerprints(
             "meta:pairing:read",
             "meta:pairing:approve",
             "erisauth:approve",
-            "erisauth:passphrase"
+            "erisauth:passphrase",
+            "erisauth.devices:*",
+            "erisauth.mail:*"
         ]),
         "what makes it an ErisAuth device is shown apart from its ceiling"
     );

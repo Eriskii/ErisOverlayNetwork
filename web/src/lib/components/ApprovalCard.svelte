@@ -102,7 +102,7 @@
         <label class="grant fixed" title={approval.essential.join('\n')}>
           <input type="checkbox" checked disabled />
           <span>Act as an ErisAuth device</span>
-          <span class="faint">open and approve pairings, ask home</span>
+          <span class="faint">approve pairings, ask home, pair with your other devices</span>
         </label>
       {/if}
       {#each optional as grant (grant)}

@@ -302,7 +302,17 @@ impl Device {
 
     /// Start `erisauth serve` and wait for its socket.
     pub async fn serve(&mut self) {
-        self.daemon = Some(self.command(&["serve", "--no-notify"]).spawn().unwrap());
+        self.serve_with(&[]).await
+    }
+
+    /// Start `erisauth serve` with extra environment, such as where this
+    /// device's ErisFiles lives, and wait for its socket.
+    pub async fn serve_with(&mut self, env: &[(&str, &std::path::Path)]) {
+        let mut command = self.command(&["serve", "--no-notify"]);
+        for (name, value) in env {
+            command.env(name, value);
+        }
+        self.daemon = Some(command.spawn().unwrap());
         let socket = self.socket();
         tokio::time::timeout(Duration::from_secs(60), async {
             while tokio::net::UnixStream::connect(&socket).await.is_err() {

@@ -29,6 +29,7 @@ tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
+erisfiles = { git = "https://github.com/Eriskii/ErisFiles", rev = "a55afd1829c51a393880d6864cde5e491c37912f" }
 erisdb = { git = "https://github.com/Eriskii/ErisDB", rev = "f19a3aa3f371675036b36e01aaff8007a74df630" }
 sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "postgres"] }
 tempfile = "3"
