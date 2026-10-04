@@ -155,13 +155,9 @@ impl Agent {
         self.standing.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
-    /// Take up this device's standing with ErisDB: dial it, and start
-    /// pairing this device's ErisFiles with the other devices.
+    /// Take up this device's standing with ErisDB.
     pub async fn stand(&self, joined: Joined) -> anyhow::Result<()> {
         let db = Arc::new(joined.dial(&self.paths).await?);
-        if let Some(peering) = super::peering::Peering::new(db.clone(), joined.clone()) {
-            tokio::spawn(peering.run());
-        }
         *self.standing.write().unwrap_or_else(|e| e.into_inner()) = Some(Standing { db, joined });
         *self.held.lock().await = None;
         self.changed();

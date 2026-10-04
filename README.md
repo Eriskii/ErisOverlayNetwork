@@ -69,22 +69,6 @@ approving, as with any ErisLogin pairing. What makes the newcomer an ErisAuth de
 refused whole; its ceiling can be narrowed. A ceiling beyond the approving device's own grants takes
 the passphrase.
 
-### ErisFiles among your devices
-
-Devices in ErisAuth become [ErisFiles](https://github.com/Eriskii/ErisFiles) peers of one another with
-no ceremony of their own: approving a device into ErisAuth is the approval. Each device finds the
-ErisFiles running beside it (`$ERISFILES_HOME`, else `$XDG_DATA_HOME/erisfiles`) and announces itself
-in ErisDB's `erisauth.devices` facet: its installation, its name and its ErisFiles device id. Of two
-announced devices that are not yet peers, the one with the lower ErisFiles id opens a pairing on its
-ErisFiles and posts the ticket to the other in `erisauth.mail`.
-
-ErisFiles grants apply both ways, so joining a stranger's ticket would open this device's files to
-them. A device therefore joins an invitation only when ErisDB says its sender wrote it, the sender has
-announced itself, and the ticket is for the ErisFiles the sender announced; the inviter approves only
-the ErisFiles key the invitee announced. Anything else is dropped. Holding `erisauth.devices:create` is
-what lets an installation announce a device the others will share files with, and only ErisAuth devices
-ask for it.
-
 ## On Android
 
 The app `dev.eris.auth` (in `android/`) runs the same daemon in its own process and shows the
@@ -112,8 +96,7 @@ ErisAuth.connect(context) { erisAuth ->
 
 Its manifest declares the `<queries>` entry an app needs to see ErisAuth. The calls are written out
 as Binder transactions in `Wire.kt` rather than generated from AIDL, so the client and the service
-share one definition. The app does not pair ErisFiles: ErisFiles on Android is another app, whose
-state ErisAuth cannot read.
+share one definition.
 
 Build it with `scripts/build-android.sh`, which needs the Android SDK and NDK, `cargo-ndk`, and the
 `aarch64-linux-android` and `x86_64-linux-android` Rust targets. It builds the page and the JNI

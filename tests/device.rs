@@ -17,8 +17,6 @@ const BASE: &[&str] = &[
     "meta:pairing:approve",
     "erisauth:approve",
     "erisauth:passphrase",
-    "erisauth.devices:*",
-    "erisauth.mail:*",
 ];
 
 async fn collect(client: &erisdb_client::Client) -> Vec<String> {

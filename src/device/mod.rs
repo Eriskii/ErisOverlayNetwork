@@ -10,7 +10,6 @@ pub mod agent;
 pub mod mobile;
 pub mod notify;
 pub mod page;
-pub mod peering;
 pub mod prompt;
 pub mod socket;
 
@@ -22,15 +21,13 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 /// What a device holds besides its ceiling: opening and approving pairings,
-/// asking ErisAuth in ErisDB, and announcing itself to and inviting the other devices.
-pub const BASE: [&str; 7] = [
+/// and asking ErisAuth in ErisDB.
+pub const BASE: [&str; 5] = [
     "meta:pairing:create",
     "meta:pairing:read",
     "meta:pairing:approve",
     "erisauth:approve",
     "erisauth:passphrase",
-    "erisauth.devices:*",
-    "erisauth.mail:*",
 ];
 
 /// Where a device keeps its key and its standing with ErisDB, and where it listens.
