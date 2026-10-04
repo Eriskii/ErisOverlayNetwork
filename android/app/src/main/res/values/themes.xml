@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Compose owns the theming; the window theme only matches the system's light or dark mode
+         (see values-night) and keeps force-dark from inverting what is already themed. -->
+    <style name="Theme.ErisAuth" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:forceDarkAllowed">false</item>
+    </style>
+</resources>

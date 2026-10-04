@@ -1,8 +1,9 @@
 //! ErisAuth inside an Android app. The daemon runs in the app's process: the
-//! approval page for the app's WebView, and the requests that apps make
-//! through the app's bound service. The service passes each request here
-//! with who Android says is calling, since apps on Android cannot reach one
-//! another's sockets. Answers are JSON strings, for the JNI layer to hand on.
+//! app's screens send it the [commands](super::command) the socket takes, and
+//! apps make their requests through the app's bound service, which passes
+//! each here with who Android says is calling, since apps on Android cannot
+//! reach one another's sockets. Answers are JSON strings, for the JNI layer
+//! to hand on. Nothing listens on the network for the app's screens.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -10,35 +11,49 @@ use std::time::Duration;
 
 use anyhow::Result;
 use erislogin::agent::{Ask, Reply};
-use serde_json::json;
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::agent::{Agent, Peer};
-use super::{Joined, Paths, page};
+use super::{Joined, Paths};
 
 #[derive(Clone)]
 pub struct Mobile {
     agent: Arc<Agent>,
-    link: Arc<String>,
 }
 
 impl Mobile {
-    /// Start with the key and standing kept in `data`, and serve the page.
+    /// Start with the key and standing kept in `data`.
     pub async fn start(data: PathBuf, runtime: PathBuf) -> Result<Self> {
         let paths = Paths { data, runtime };
         let agent = Agent::new(paths.clone(), false);
         if let Some(joined) = Joined::load(&paths)? {
             agent.stand(joined).await?;
         }
-        let (link, page) = page::listen(&paths.runtime, agent.clone()).await?;
-        agent.set_page(link.clone());
-        tokio::spawn(page);
-        Ok(Mobile { agent, link: Arc::new(link) })
+        Ok(Mobile { agent })
     }
 
-    /// The approval page, token included, for the app's WebView.
-    pub fn link(&self) -> &str {
-        &self.link
+    /// One command from the app's screens. A ticket for a new device comes
+    /// with its QR code laid out for the app to draw: `qr.side` modules a
+    /// side, `qr.modules` a `1` for each dark one, row by row.
+    pub async fn command(&self, message: &str) -> String {
+        let message: Value = match serde_json::from_str(message) {
+            Ok(message) => message,
+            Err(e) => {
+                return json!({"error": "bad_request", "message": format!("unreadable command: {e}")}).to_string();
+            }
+        };
+        let mut answer = super::command::run(&self.agent, message).await;
+        if let Some(ticket) = answer["ticket"].as_str() {
+            match erislogin::qr::raster(ticket, 1) {
+                Ok((side, pixels)) => {
+                    let modules: String = pixels.iter().map(|&p| if p == 0 { '1' } else { '0' }).collect();
+                    answer["qr"] = json!({"side": side, "modules": modules});
+                }
+                Err(e) => answer = json!({"error": "cannot_add", "message": e.to_string()}),
+            }
+        }
+        answer.to_string()
     }
 
     /// An app asks, as ErisLogin's [`Ask`] in JSON, with `caller` the

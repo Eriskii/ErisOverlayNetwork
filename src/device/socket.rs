@@ -3,17 +3,9 @@
 //!
 //! Each connection sends one JSON line. Apps send ErisLogin's
 //! [`pair`](erislogin::agent) request and hold the connection open until it
-//! is answered; hanging up withdraws it. The person's tools send:
-//!
-//! ```text
-//! {"op":"approvals"}                                  → {"approvals":[…]}
-//! {"op":"watch"}                                      → {"approvals":[…]} on every change
-//! {"op":"decide","id":…,"granted":[…],"passphrase":…} → {"ok":true} or {"error":…}
-//! {"op":"deny","id":…}                                → {"ok":true} or {"error":…}
-//! {"op":"add"}                                        → {"id","ticket","svg","expires"}: a new device joins with it
-//! {"op":"passphrase","current":…,"new":…}             → {"ok":true} or {"error":…}; without `current`, a reset
-//! {"op":"unlock","installation":…}                    → {"ok":true} or {"error":…}; every device without one
-//! ```
+//! is answered; hanging up withdraws it. The person's tools send
+//! `{"op":"watch"}`, answered with `{"approvals":[…]}` on every change, or one
+//! of the [commands](super::command), each answered once.
 //!
 //! Any process of this user can connect, as it can read the device's key.
 //! What the device approves by itself is within its ceiling either way; the
@@ -24,12 +16,10 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use erislogin::agent::{MAX_LINE, Reply, Request};
-use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::{UnixListener, UnixStream};
-use uuid::Uuid;
 
 use super::agent::{Agent, Peer};
 
@@ -73,32 +63,6 @@ async fn send(write: &mut OwnedWriteHalf, value: &impl serde::Serialize) -> Resu
     Ok(())
 }
 
-#[derive(Deserialize)]
-struct Decide {
-    id: Uuid,
-    granted: Vec<String>,
-    #[serde(default)]
-    passphrase: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct Passphrase {
-    #[serde(default)]
-    current: Option<String>,
-    new: String,
-}
-
-#[derive(Deserialize)]
-struct Unlock {
-    #[serde(default)]
-    installation: Option<Uuid>,
-}
-
-#[derive(Deserialize)]
-struct Deny {
-    id: Uuid,
-}
-
 async fn connection(stream: UnixStream, agent: Arc<Agent>) -> Result<()> {
     let peer = peer(&stream);
     let (read, mut write) = stream.into_split();
@@ -134,8 +98,6 @@ async fn connection(stream: UnixStream, agent: Arc<Agent>) -> Result<()> {
                 }
             }
         }
-        Some("approvals") => send(&mut write, &json!({"approvals": agent.approvals()})).await,
-        Some("add") => send(&mut write, &agent.add().await).await,
         Some("watch") => {
             let mut changes = agent.subscribe();
             let mut rest = [0u8; 1];
@@ -147,22 +109,6 @@ async fn connection(stream: UnixStream, agent: Arc<Agent>) -> Result<()> {
                 }
             }
         }
-        Some("decide") => match serde_json::from_value::<Decide>(message) {
-            Ok(d) => send(&mut write, &agent.approve(d.id, d.granted, d.passphrase).await).await,
-            Err(e) => send(&mut write, &json!({"error": "bad_request", "message": e.to_string()})).await,
-        },
-        Some("deny") => match serde_json::from_value::<Deny>(message) {
-            Ok(d) => send(&mut write, &agent.deny(d.id)).await,
-            Err(e) => send(&mut write, &json!({"error": "bad_request", "message": e.to_string()})).await,
-        },
-        Some("passphrase") => match serde_json::from_value::<Passphrase>(message) {
-            Ok(p) => send(&mut write, &agent.passphrase(p.current, p.new).await).await,
-            Err(e) => send(&mut write, &json!({"error": "bad_request", "message": e.to_string()})).await,
-        },
-        Some("unlock") => match serde_json::from_value::<Unlock>(message) {
-            Ok(u) => send(&mut write, &agent.unlock(u.installation).await).await,
-            Err(e) => send(&mut write, &json!({"error": "bad_request", "message": e.to_string()})).await,
-        },
-        other => send(&mut write, &json!({"error": "bad_request", "message": format!("no operation {other:?}")})).await,
+        _ => send(&mut write, &super::command::run(&agent, message).await).await,
     }
 }

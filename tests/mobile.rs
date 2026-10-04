@@ -1,6 +1,7 @@
 //! ErisAuth inside an Android app: the daemon runs in the app's process, and
 //! apps reach it through the app's bound service, which passes their requests
 //! to [`erisauth::device::mobile`] along with who Android says is calling.
+//! The app's own screens send the daemon the commands its socket takes.
 
 mod support;
 
@@ -21,19 +22,9 @@ fn caller() -> Value {
     json!({"package": "dev.example.notes", "certificate": "ab".repeat(32), "pid": 4242})
 }
 
-/// Approve through the page, as the person does in the app's WebView.
-async fn approve_on_page(mobile: &Mobile, id: &str, granted: &[&str]) -> Value {
-    let (base, token) = mobile.link().split_once("/#token=").map(|(b, t)| (b.to_string(), t.to_string())).unwrap();
-    reqwest::Client::new()
-        .post(format!("{base}/api/approvals/{id}/approve"))
-        .bearer_auth(token)
-        .json(&json!({"granted": granted}))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap()
+/// One command from the app's screens, and its answer.
+async fn command(mobile: &Mobile, message: Value) -> Value {
+    serde_json::from_str(&mobile.command(&message.to_string()).await).unwrap()
 }
 
 #[tokio::test]
@@ -58,7 +49,11 @@ async fn an_android_app_signs_in_through_the_service() {
     assert_eq!(asked["client"], "Notes");
     assert_eq!(asked["package"], "dev.example.notes", "Android's word for who is asking");
     assert_eq!(asked["certificate"], "ab".repeat(32));
-    assert_eq!(approve_on_page(&mobile, &id, &["notes:read"]).await, json!({"ok": true}));
+    let state = command(&mobile, json!({"op": "state"})).await;
+    assert_eq!(state["device"]["name"], "Phone");
+    assert_eq!(state["approvals"][0]["id"], id.as_str(), "the screen lists what waits for the person");
+    let decided = command(&mobile, json!({"op": "decide", "id": id, "granted": ["notes:read"]})).await;
+    assert_eq!(decided, json!({"ok": true}));
     let answer: Value = serde_json::from_str(&answer.await.unwrap()).unwrap();
     assert_eq!(answer, json!({"approved": ["notes:read"]}));
 }
@@ -89,14 +84,48 @@ async fn an_app_that_goes_away_withdraws_its_request() {
 }
 
 #[tokio::test]
-async fn an_unjoined_phone_says_so_and_joins_from_its_page() {
+async fn an_unjoined_phone_says_so_and_joins_from_its_screen() {
+    let core = Core::start().await;
     let device = Device::new();
     let mobile = Mobile::start(device.data.path().join("erisauth"), device.runtime.path().to_path_buf()).await.unwrap();
+    assert!(!device.runtime.path().join("erisauth/page").exists(), "the phone serves no web page");
     let app = App::new("Notes");
     let refused: Value = serde_json::from_str(
         &mobile.ask(&serde_json::to_string(&app.ask(&["notes:read"])).unwrap(), &caller().to_string()).await,
     )
     .unwrap();
     assert!(refused["error"].as_str().unwrap().contains("not joined"), "{refused}");
-    assert!(mobile.link().starts_with("http://127.0.0.1:"));
+    assert_eq!(command(&mobile, json!({"op": "state"})).await["device"]["joined"], false);
+
+    let ((pairing, code), _) = core.cut_raw().await;
+    let ticket = core.ticket(&code);
+    let started =
+        command(&mobile, json!({"op": "join", "ticket": ticket, "name": "Phone", "ceiling": ["notes:*"]})).await;
+    assert_eq!(started, json!({"ok": true}));
+    core.await_requested(&pairing).await;
+    let (status, approved) = core.root.post(&format!("/v1/pairings/{pairing}/approve"), json!({})).await;
+    assert_eq!(status, 200, "{approved}");
+    tokio::time::timeout(Duration::from_secs(60), async {
+        while command(&mobile, json!({"op": "state"})).await["device"]["joined"] != true {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("the phone never joined");
+}
+
+/// A new device joins with a ticket the phone shows as a QR code, drawn by
+/// the app from the modules the daemon lays out.
+#[tokio::test]
+async fn the_phone_shows_a_new_device_its_ticket_as_a_qr_code() {
+    let core = Core::start().await;
+    let (_device, mobile) = phone(&core).await;
+    let added = command(&mobile, json!({"op": "add"})).await;
+    assert!(added["ticket"].as_str().unwrap().starts_with("erisdb://pair/"), "{added}");
+    let side = added["qr"]["side"].as_u64().unwrap() as usize;
+    let modules = added["qr"]["modules"].as_str().unwrap();
+    assert_eq!(modules.len(), side * side, "one character per module, row by row");
+    assert!(modules.chars().all(|c| c == '0' || c == '1'));
+    assert!(modules.contains('1') && modules.contains('0'));
+    assert_eq!(&modules[..side], "0".repeat(side), "a quiet zone around the code");
 }

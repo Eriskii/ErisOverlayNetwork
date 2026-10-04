@@ -26,20 +26,27 @@ fn not_started() -> String {
     json!({"error": "ErisAuth has not started"}).to_string()
 }
 
-/// Start the daemon with its state in `data`, or answer for the one running:
-/// `{"page"}` with the approval page's link, or `{"error"}`.
+/// Start the daemon with its state in `data`, unless it runs already:
+/// `{"ok": true}`, or `{"error"}`.
 pub fn start(data: PathBuf, runtime_dir: PathBuf) -> String {
     let mut slot = MOBILE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(mobile) = slot.as_ref() {
-        return json!({"page": mobile.link()}).to_string();
+    if slot.is_some() {
+        return json!({"ok": true}).to_string();
     }
     match runtime().block_on(Mobile::start(data, runtime_dir)) {
         Ok(mobile) => {
-            let answer = json!({"page": mobile.link()}).to_string();
             *slot = Some(mobile);
-            answer
+            json!({"ok": true}).to_string()
         }
         Err(e) => json!({"error": format!("{e:#}")}).to_string(),
+    }
+}
+
+/// One command from the app's screens.
+pub fn command(message: &str) -> String {
+    match mobile() {
+        Some(mobile) => runtime().block_on(mobile.command(message)),
+        None => not_started(),
     }
 }
 
@@ -99,6 +106,17 @@ mod jni_bindings {
     ) -> jstring {
         let (data, runtime) = (text(&mut env, &data), text(&mut env, &runtime));
         let answer = guarded(move || super::start(data.into(), runtime.into()));
+        reply(&mut env, answer)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_dev_eris_auth_Native_command(
+        mut env: JNIEnv,
+        _class: JClass,
+        message: JString,
+    ) -> jstring {
+        let message = text(&mut env, &message);
+        let answer = guarded(move || super::command(&message));
         reply(&mut env, answer)
     }
 

@@ -71,12 +71,15 @@ the passphrase.
 
 ## On Android
 
-The app `dev.eris.auth` (in `android/`) runs the same daemon in its own process and shows the
-approval page in a WebView. A phone joins from that page, or by opening an `erisdb://pair/…` ticket
-with the camera, which fills the page's join form in.
+The app `dev.eris.auth` (in `android/`) runs the same daemon in its own process, with its own
+Material screens rather than the approval page: they send the daemon the commands its socket takes
+(`device::command`), through one JNI call, and nothing listens on the network for them. A phone
+joins from its join screen, or by opening an `erisdb://pair/…` ticket with the camera, which fills
+the ticket in. Adding a device shows the ticket as a QR code the app draws from the modules the
+daemon lays out; the screens with a ticket or a passphrase on them are kept out of screenshots.
 
 Android apps cannot reach one another's sockets, so apps bind ErisAuth's service instead, with the
-`dev.eris.auth.SIGN_IN` action. Android tells the service which app is calling: the page and the
+`dev.eris.auth.SIGN_IN` action. Android tells the service which app is calling: the request and the
 notification show its package and the SHA-256 of its signing certificate, not a name the app chose.
 The conversation is the socket's: ask, receive the ticket, redeem it with the app's own key, hear
 the answer. An app that goes away withdraws its request, and only the app that opened a request can

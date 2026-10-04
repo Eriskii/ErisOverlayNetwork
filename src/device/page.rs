@@ -109,11 +109,7 @@ async fn authorize(State(page): State<Page>, request: Request, next: Next) -> Re
 }
 
 async fn state(State(page): State<Page>) -> Json<serde_json::Value> {
-    Json(json!({
-        "device": page.agent.device().await,
-        "approvals": page.agent.approvals(),
-        "joining": page.agent.joining(),
-    }))
+    Json(super::command::state(&page.agent).await)
 }
 
 #[derive(Deserialize)]
