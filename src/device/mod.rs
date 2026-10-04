@@ -2,7 +2,7 @@
 //!
 //! A device joins ErisDB once, as an installation of its own over Iroh
 //! ([`begin_join`], from the command line or the page). It asks for the right to open and approve pairings, to ask
-//! home, and for a ceiling: the grants it may approve for an app by itself.
+//! ErisAuth in ErisDB, and for a ceiling: the grants it may approve for an app by itself.
 //! [`serve`] then listens where apps look for it and puts their requests
 //! to the person.
 
@@ -22,7 +22,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 /// What a device holds besides its ceiling: opening and approving pairings,
-/// asking home, and announcing itself to and inviting the other devices.
+/// asking ErisAuth in ErisDB, and announcing itself to and inviting the other devices.
 pub const BASE: [&str; 7] = [
     "meta:pairing:create",
     "meta:pairing:read",

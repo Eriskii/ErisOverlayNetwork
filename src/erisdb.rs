@@ -38,7 +38,7 @@ impl Credential {
     pub fn load(dir: &Path) -> Result<Self> {
         let path = Self::path(dir);
         let bytes = std::fs::read(&path)
-            .with_context(|| format!("no ErisDB credential at {}; run `erisauth home setup` first", path.display()))?;
+            .with_context(|| format!("no ErisDB credential at {}; run `erisauth setup` first", path.display()))?;
         serde_json::from_slice(&bytes).with_context(|| format!("{} is not an ErisDB credential", path.display()))
     }
 

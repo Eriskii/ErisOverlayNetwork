@@ -1,5 +1,5 @@
 //! ErisAuth's plugin executable. ErisDB starts it once per call, as its
-//! manifest (`deploy/erisauth.json`) says: `erisdb-plugin-erisauth --home DIR`.
+//! manifest (`deploy/erisauth.json`) says: `erisdb-plugin-erisauth --dir DIR`.
 
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
@@ -9,9 +9,9 @@ use serde_json::json;
 fn main() {
     let mut args = std::env::args().skip(1);
     let dir = match (args.next().as_deref(), args.next()) {
-        (Some("--home"), Some(dir)) => PathBuf::from(dir),
+        (Some("--dir"), Some(dir)) => PathBuf::from(dir),
         _ => {
-            eprintln!("usage: erisdb-plugin-erisauth --home DIR");
+            eprintln!("usage: erisdb-plugin-erisauth --dir DIR");
             std::process::exit(2);
         }
     };
@@ -25,7 +25,7 @@ fn main() {
                 runtime.block_on(erisauth::plugin::answer(&dir, invocation)).unwrap_or_else(|e| {
                     // The operator's log gets the detail; the caller gets that it failed.
                     eprintln!("erisauth: {e:#}");
-                    (500, json!({"error": "internal", "message": "home could not answer; see the ErisDB log"}))
+                    (500, json!({"error": "internal", "message": "ErisAuth could not answer; see the ErisDB log"}))
                 })
             }
         },

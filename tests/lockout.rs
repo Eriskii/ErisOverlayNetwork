@@ -1,6 +1,6 @@
 //! How long a device waits after wrong passphrases.
 
-use erisauth::home::{FREE_ATTEMPTS, Lockout, MAX_LOCK_SECS};
+use erisauth::plugin::state::{FREE_ATTEMPTS, Lockout, MAX_LOCK_SECS};
 
 #[test]
 fn waits_start_at_a_minute_double_and_stop_at_a_day() {

@@ -3,7 +3,7 @@
   "name": "erisauth",
   "description": "Approvals beyond a device's own authority, when the person gives the passphrase",
   "executable": "/usr/local/libexec/erisdb/erisdb-plugin-erisauth",
-  "args": ["--home", "/var/lib/erisauth"],
+  "args": ["--dir", "/var/lib/erisauth"],
   "environment": {},
   "timeout_secs": 30,
   "operations": {

@@ -95,14 +95,14 @@ pub struct Core {
     pub secret: Vec<u8>,
     /// Where the core answers over Iroh.
     pub addr: iroh::EndpointAddr,
-    /// The plugin's state directory, as the manifest's `--home` names it.
-    pub home: PathBuf,
+    /// The plugin's state directory, as the manifest's `--dir` names it.
+    pub plugin_dir: PathBuf,
     _dirs: tempfile::TempDir,
 }
 
 impl Core {
     /// A core in a fresh database, serving the shipped plugin manifest with
-    /// its executable and home pointed at this build and a temporary directory.
+    /// its executable and state directory pointed at this build and a temporary one.
     pub async fn start() -> Self {
         let pg = pg().await;
         let db = format!("erisauth_{}", uuid::Uuid::new_v4().simple());
@@ -114,12 +114,12 @@ impl Core {
 
         let dirs = tempfile::tempdir().unwrap();
         let plugins = dirs.path().join("plugins.d");
-        let home = dirs.path().join("home");
+        let plugin_dir = dirs.path().join("plugin");
         std::fs::create_dir(&plugins).unwrap();
         let shipped = Path::new(env!("CARGO_MANIFEST_DIR")).join("deploy/erisauth.json");
         let mut manifest: Value = serde_json::from_slice(&std::fs::read(shipped).unwrap()).unwrap();
         manifest["executable"] = json!(env!("CARGO_BIN_EXE_erisdb-plugin-erisauth"));
-        manifest["args"] = json!(["--home", home]);
+        manifest["args"] = json!(["--dir", plugin_dir]);
         std::fs::write(plugins.join("erisauth.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
         let registry = erisdb::PluginRegistry::load_dir(&plugins).unwrap();
 
@@ -136,7 +136,7 @@ impl Core {
         let addr = erisdb::net::advertised_addr(&endpoint).await.unwrap();
         tokio::spawn(erisdb::net::serve(endpoint, app));
         let root = Caller::new(&base, &erisdb::auth::mint(&secret, &["*"], Some(3600), None).unwrap());
-        Core { base, root, secret, addr, home, _dirs: dirs }
+        Core { base, root, secret, addr, plugin_dir, _dirs: dirs }
     }
 
     /// Cut a pairing as the root operator: its id and a ticket for it.
@@ -160,10 +160,10 @@ impl Core {
             .unwrap()
     }
 
-    /// Run `erisauth home setup`, approving its request as the operator would.
-    pub async fn setup_home(&self) -> std::process::Output {
+    /// Run `erisauth setup` for the plugin, approving its request as the operator would.
+    pub async fn setup_plugin(&self) -> std::process::Output {
         let (id, ticket) = self.cut().await;
-        let mut child = self.erisauth(&["home", "setup", "--erisdb", &self.base, &ticket]);
+        let mut child = self.erisauth(&["setup", "--erisdb", &self.base, &ticket]);
         let mut stdin = child.stdin.take().unwrap();
         stdin.write_all(format!("{PASSPHRASE}\n").as_bytes()).await.unwrap();
         drop(stdin);
@@ -175,13 +175,13 @@ impl Core {
         output
     }
 
-    /// `erisauth` with this core's home directory.
+    /// An `erisauth` command run on the ErisDB machine, with the plugin's state directory.
     pub fn erisauth(&self, args: &[&str]) -> tokio::process::Child {
-        let (first, rest) = args.split_at(2);
+        let (first, rest) = args.split_at(1);
         tokio::process::Command::new(env!("CARGO_BIN_EXE_erisauth"))
             .args(first)
-            .arg("--home")
-            .arg(&self.home)
+            .arg("--dir")
+            .arg(&self.plugin_dir)
             .args(rest)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -191,7 +191,7 @@ impl Core {
             .unwrap()
     }
 
-    /// Run an `erisauth home …` command to completion.
+    /// Run such a command to completion.
     pub async fn run(&self, args: &[&str]) -> std::process::Output {
         let child = self.erisauth(args);
         tokio::time::timeout(Duration::from_secs(30), child.wait_with_output()).await.unwrap().unwrap()

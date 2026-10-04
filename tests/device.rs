@@ -67,9 +67,9 @@ async fn a_device_joins_then_approves_an_app_inside_its_ceiling() {
 }
 
 #[tokio::test]
-async fn beyond_its_ceiling_a_device_asks_home_with_the_passphrase() {
+async fn beyond_its_ceiling_a_device_asks_erisauth_in_erisdb_with_the_passphrase() {
     let core = Core::start().await;
-    core.setup_home().await;
+    core.setup_plugin().await;
     let mut device = Device::new();
     device.join(&core, "Phone", &["notes:read"]).await;
     device.serve().await;
@@ -191,7 +191,7 @@ async fn an_app_on_a_device_that_has_not_joined_hears_why() {
 }
 
 #[tokio::test]
-async fn beyond_its_ceiling_without_home_the_person_hears_why() {
+async fn beyond_its_ceiling_without_the_plugin_the_person_hears_why() {
     let core = Core::start().await;
     let mut device = Device::new();
     device.join(&core, "Phone", &["notes:read"]).await;
@@ -205,8 +205,8 @@ async fn beyond_its_ceiling_without_home_the_person_hears_why() {
     let answer = device
         .say(json!({"op": "decide", "id": approval["id"], "granted": ["tasks:read"], "passphrase": PASSPHRASE}))
         .await;
-    assert_eq!(answer["error"], "no_home", "{answer}");
-    assert!(answer["message"].as_str().unwrap().contains("erisauth home setup"), "{answer}");
+    assert_eq!(answer["error"], "not_set_up", "{answer}");
+    assert!(answer["message"].as_str().unwrap().contains("erisauth setup"), "{answer}");
     assert_eq!(device.approvals().await.len(), 1, "the request stays open");
 }
 

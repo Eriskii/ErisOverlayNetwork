@@ -21,7 +21,7 @@ fingerprint, and approve. A device without a terminal joins from its approval pa
 that has not joined shows a form for the ticket, a name and the ceiling, then the fingerprint, and
 becomes a working device once someone approves. A link to the page carrying `&join=<ticket>` in its
 fragment fills the ticket in. The device asks for the
-right to open and approve pairings, to ask [home](#home), and to announce itself to and invite the
+right to open and approve pairings, to ask [ErisAuth in ErisDB](#in-erisdb), and to announce itself to and invite the
 other devices, plus its ceiling: the grants it may
 approve for an app by itself. Without `--ceiling` the ceiling is everything (`*`). Its key and
 standing live in `$XDG_DATA_HOME/erisauth/`.
@@ -37,7 +37,7 @@ ErisLogin's `agent` module. An ErisDB app in Rust does all of it in one call,
    Anything else is denied before the person sees it.
 4. The person is asked, with the program's path as the kernel reports it, not as the app claims.
    They approve it as asked, approve part of it, or say no.
-5. What fits inside the device's grants, the device approves itself. Anything more goes to home, and
+5. What fits inside the device's grants, the device approves itself. Anything more goes to ErisAuth in ErisDB, and
    the person types the passphrase.
 6. The app hears the answer and collects its own credential from ErisDB. From then on it talks to
    ErisDB directly.
@@ -67,7 +67,7 @@ erisauth join --name phone --ceiling 'notes:*' 'erisdb://pair/…'   # on the ne
 The ticket crosses from one screen to another, so the person compares the fingerprint both show before
 approving, as with any ErisLogin pairing. What makes the newcomer an ErisAuth device is granted or
 refused whole; its ceiling can be narrowed. A ceiling beyond the approving device's own grants takes
-the passphrase, through home.
+the passphrase.
 
 ### ErisFiles among your devices
 
@@ -119,12 +119,12 @@ Build it with `scripts/build-android.sh`, which needs the Android SDK and NDK, `
 `aarch64-linux-android` and `x86_64-linux-android` Rust targets. It builds the page and the JNI
 library for both, runs the Kotlin unit tests, and assembles the debug APK.
 
-## Home
+## In ErisDB
 
-Home is ErisAuth's plugin in [ErisDB](https://github.com/Eriskii/ErisDB). It is an ErisDB
+ErisAuth is also a plugin in [ErisDB](https://github.com/Eriskii/ErisDB). There it is an ErisDB
 installation holding `*`, and it approves a pending pairing for a registered ErisAuth device that
 brings the passphrase. A device approves what fits inside its own grants by itself; for anything more
-it asks home, and the person types the passphrase. A stolen device without the passphrase gets only
+it asks ErisAuth in ErisDB, and the person types the passphrase. A stolen device without the passphrase gets only
 its own grants, and the passphrase without an enrolled device gets nothing.
 
 | Operation    | Permission            | Input                                          | Answer                 |
@@ -143,9 +143,10 @@ the device vouched for. Refusals are JSON `{error, message}`:
 | 404    | `no_such_pairing`  |                                                                       |
 | 409    | `not_waiting`      | The pairing is not waiting for an answer                              |
 | 409    | `not_the_app`      | A different key redeemed the pairing than the device vouched for      |
+| 503    | `not_set_up`       | `erisauth setup` has not run on the ErisDB machine                    |
 
-Home keeps the passphrase as an Argon2id hash in ErisDB's `erisauth.home` facet, which only home and
-the operator can read, with each device's wrong guesses. A device has three free guesses; then it
+The plugin keeps the passphrase as an Argon2id hash in ErisDB's `erisauth.passphrase` facet, which
+only the plugin and the operator can read, with each device's wrong guesses. A device has three free guesses; then it
 waits a minute, then two, then four, doubling up to a day. A right guess clears its count, and one
 device's guesses never lock out another.
 
@@ -163,19 +164,19 @@ sudo install -d -o erisdb -g erisdb -m 0700 /var/lib/erisauth
 Restart ErisDB so it loads the manifest. Cut a ticket with `erisdb pair` and hand it to setup:
 
 ```sh
-erisauth home setup --erisdb http://127.0.0.1:7700 'erisdb://pair/…'
+erisauth setup --erisdb http://127.0.0.1:7700 'erisdb://pair/…'
 ```
 
 Setup shows a fingerprint to compare with the `erisdb pair` terminal. Approve the request as asked:
-home asks for `*`. Setup then registers the facet and asks for the passphrase twice.
+ErisAuth asks for `*`. Setup then registers the facet and asks for the passphrase twice.
 
-| Command                               | What it does                                              |
-| ------------------------------------- | --------------------------------------------------------- |
-| `erisauth home passphrase`            | Set a new passphrase without the old one                   |
-| `erisauth home unlock [INSTALLATION]` | Let one device, or every device, guess again now           |
+| Command                          | What it does                                     |
+| -------------------------------- | ------------------------------------------------ |
+| `erisauth passphrase`            | Set a new passphrase without the old one         |
+| `erisauth unlock [INSTALLATION]` | Let one device, or every device, guess again now |
 
-Each takes `--home DIR`, default `/var/lib/erisauth`, which must match the `--home` in the manifest.
-Home's credential there is `erisdb.json`, mode 0600: back it up as a credential, or revoke the
+These run on the ErisDB machine. Each takes `--dir DIR`, default `/var/lib/erisauth`, which must
+match the `--dir` in the manifest. The plugin's credential there is `erisdb.json`, mode 0600: back it up as a credential, or revoke the
 installation and run setup again.
 
 ## Building and testing

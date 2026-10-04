@@ -112,7 +112,7 @@
         <label class="grant fixed" title={approval.essential.join('\n')}>
           <input type="checkbox" checked disabled />
           <span>Act as an ErisAuth device</span>
-          <span class="faint">approve pairings, ask home, pair with your other devices</span>
+          <span class="faint">approve pairings, use the passphrase, pair with your other devices</span>
         </label>
       {/if}
       {#each optional as grant (grant)}
@@ -132,7 +132,7 @@
     >
       {#if needs && granted.length}
         <!-- Password managers file the passphrase under this name. -->
-        <input type="text" name="username" autocomplete="username" value="ErisAuth home" readonly hidden />
+        <input type="text" name="username" autocomplete="username" value="ErisAuth" readonly hidden />
         <input
           class="field"
           type="password"

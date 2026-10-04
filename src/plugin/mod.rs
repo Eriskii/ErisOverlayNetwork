@@ -10,7 +10,9 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::erisdb::Session;
-use crate::home::{self, Guess};
+
+pub mod state;
+use self::state::Guess;
 
 #[derive(Debug, Deserialize)]
 pub struct Invocation {
@@ -48,7 +50,7 @@ struct Change {
     new: String,
 }
 
-/// Answer one invocation, with home's state in `dir`.
+/// Answer one invocation, with the plugin's state in `dir`.
 pub async fn answer(dir: &Path, invocation: Invocation) -> Result<Answer> {
     if invocation.protocol != 1 {
         return Ok(refuse(400, "protocol", "this plugin speaks protocol 1"));
@@ -57,13 +59,17 @@ pub async fn answer(dir: &Path, invocation: Invocation) -> Result<Answer> {
         return Ok(refuse(403, "not_a_device", "only a registered ErisAuth device can ask home"));
     };
     if !crate::erisdb::Credential::exists(dir) {
-        return Ok(refuse(503, "no_home", "home is not set up; run `erisauth home setup` on the ErisDB machine"));
+        return Ok(refuse(
+            503,
+            "not_set_up",
+            "ErisAuth is not set up in ErisDB; run `erisauth setup` on the ErisDB machine",
+        ));
     }
     let mut db = Session::open(dir)?;
     match invocation.operation.as_str() {
         "approve" => approve(&mut db, installation, serde_json::from_value(invocation.input)?).await,
         "passphrase" => change(&mut db, installation, serde_json::from_value(invocation.input)?).await,
-        other => Ok(refuse(404, "unknown_operation", &format!("home has no operation {other:?}"))),
+        other => Ok(refuse(404, "unknown_operation", &format!("ErisAuth has no operation {other:?}"))),
     }
 }
 
@@ -80,7 +86,7 @@ fn guessed(guess: Guess) -> Option<Answer> {
 }
 
 async fn approve(db: &mut Session, installation: Uuid, ask: Approve) -> Result<Answer> {
-    if let Some(refusal) = guessed(home::guess(db, installation, &ask.passphrase).await?) {
+    if let Some(refusal) = guessed(state::guess(db, installation, &ask.passphrase).await?) {
         return Ok(refusal);
     }
     let (status, session) = db.get(&format!("/v1/pairings/{}", ask.pairing)).await?;
@@ -111,9 +117,9 @@ async fn approve(db: &mut Session, installation: Uuid, ask: Approve) -> Result<A
 }
 
 async fn change(db: &mut Session, installation: Uuid, ask: Change) -> Result<Answer> {
-    if let Some(refusal) = guessed(home::guess(db, installation, &ask.current).await?) {
+    if let Some(refusal) = guessed(state::guess(db, installation, &ask.current).await?) {
         return Ok(refusal);
     }
-    home::set_passphrase(db, &ask.new).await?;
+    state::set_passphrase(db, &ask.new).await?;
     Ok((200, json!({"changed": true})))
 }

@@ -18,7 +18,7 @@ export function encloses(parent: string[], child: string[]): boolean {
   return child.every((wanted) => parent.some((grant) => covers(grant, wanted)));
 }
 
-/** True when approving `granted` takes more than this device holds, so home and the passphrase. */
+/** True when approving `granted` takes more than this device holds, so the passphrase. */
 export function needsPassphrase(device: string[], granted: string[]): boolean {
   return !encloses(device, granted);
 }

@@ -90,7 +90,7 @@ async fn a_trusted_device_adds_a_new_one_after_the_person_compares_fingerprints(
 #[tokio::test]
 async fn a_new_device_asking_for_more_than_the_voucher_holds_takes_the_passphrase() {
     let core = Core::start().await;
-    core.setup_home().await;
+    core.setup_plugin().await;
     let mut phone = Device::new();
     phone.join(&core, "Phone", &["notes:read"]).await;
     phone.serve().await;

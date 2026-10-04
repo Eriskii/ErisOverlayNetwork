@@ -11,7 +11,7 @@
 //!
 //! Either way the request then waits for the person, who approves all or
 //! part of it, or says no. What fits inside this device's own grants the
-//! device approves itself; anything more goes to home with the passphrase.
+//! device approves itself; anything more goes to ErisAuth in ErisDB with the passphrase.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -530,20 +530,20 @@ impl Agent {
                 return failed("needs_passphrase", "this asks for more than this device may approve by itself");
             };
             let Some(identity) = approval.identity else {
-                return failed("refused", "the request names no key for home to check");
+                return failed("refused", "the request names no key for ErisAuth to check");
             };
             let input = json!({"pairing": id, "granted": granted, "identity": identity, "passphrase": passphrase});
             db.call_plugin("erisauth", "approve", input).await
         }
         .unwrap_or_else(|e| (0, json!({"error": "unreachable", "message": format!("{e:#}")})));
         if status != 200 {
-            // Home says `message`; ErisDB itself says `detail`.
+            // The plugin says `message`; ErisDB itself says `detail`.
             let message = body["message"].as_str().or(body["detail"].as_str()).map(str::to_string);
             let message = message.unwrap_or_else(|| format!("ErisDB refused ({status}): {body}"));
             return match body["error"].as_str() {
                 Some("plugin_not_found") => failed(
-                    "no_home",
-                    "ErisDB has no ErisAuth home to ask; install its plugin and run `erisauth home setup`",
+                    "not_set_up",
+                    "ErisDB has no ErisAuth plugin to ask; install it and run `erisauth setup` on the ErisDB machine",
                 ),
                 Some(error) => {
                     let mut refusal = failed(error, message);
