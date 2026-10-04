@@ -1529,6 +1529,7 @@ dependencies = [
 [[package]]
 name = "erislogin"
 version = "0.4.1"
+source = "git+https://github.com/Eriskii/ErisLogin?tag=v0.4.1#973ad3699af7e7b782d1fc20c4bfb28081365017"
 dependencies = [
  "base64 0.22.1",
  "hmac 0.12.1",
@@ -6930,15 +6931,3 @@ dependencies = [
  "syn 3.0.6",
  "winnow",
 ]
-
-[[patch.unused]]
-name = "erissandbox"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "erisharness"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "erisforge"
-version = "0.1.0"
