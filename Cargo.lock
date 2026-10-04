@@ -1344,7 +1344,7 @@ dependencies = [
 [[package]]
 name = "erisdb"
 version = "0.1.0"
-source = "git+https://github.com/Eriskii/ErisDB?rev=f19a3aa3f371675036b36e01aaff8007a74df630#f19a3aa3f371675036b36e01aaff8007a74df630"
+source = "git+https://github.com/Eriskii/ErisDB?rev=e45ce3d123b9adf8e5efa3eee91d46ddec0d66af#e45ce3d123b9adf8e5efa3eee91d46ddec0d66af"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1374,7 +1374,7 @@ dependencies = [
 [[package]]
 name = "erisdb-client"
 version = "0.1.0"
-source = "git+https://github.com/Eriskii/ErisDB?rev=f19a3aa3f371675036b36e01aaff8007a74df630#f19a3aa3f371675036b36e01aaff8007a74df630"
+source = "git+https://github.com/Eriskii/ErisDB?rev=e45ce3d123b9adf8e5efa3eee91d46ddec0d66af#e45ce3d123b9adf8e5efa3eee91d46ddec0d66af"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

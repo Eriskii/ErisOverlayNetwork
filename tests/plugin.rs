@@ -1,5 +1,6 @@
 //! The ErisAuth plugin in ErisDB: it approves what a device cannot, when the
-//! person proves they are there with the passphrase.
+//! person proves they are there with the passphrase. It keeps nothing of its
+//! own between calls: each call brings the capability its manifest names.
 
 mod support;
 
@@ -18,17 +19,21 @@ async fn status_of(core: &Core, pairing: &str) -> Value {
 }
 
 #[tokio::test]
-async fn setup_enrolls_the_plugin_and_keeps_only_a_hash_of_the_passphrase() {
+async fn the_plugin_needs_no_setup_and_keeps_only_a_hash_of_the_passphrase() {
     let core = Core::start().await;
-    let output = core.setup_plugin().await;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Compare"), "setup shows its fingerprint: {stdout}");
+    let (device, _) = core.enroll("Phone", DEVICE).await;
+    let ((pairing, code), _) = cut_with(&device).await;
+    let (app, _) = core.redeem(&code, "Notes", &["notes:read"]).await;
 
+    let (status, answer) = device.call("approve", approve(&pairing, &["notes:read"], &app, PASSPHRASE)).await;
+    assert_eq!((status, answer["error"].clone()), (503, json!("no_passphrase")), "{answer}");
+    let (status, answer) = device.call("passphrase", json!({"current": PASSPHRASE, "new": "a new passphrase"})).await;
+    assert_eq!((status, answer["error"].clone()), (503, json!("no_passphrase")), "{answer}");
+
+    core.set_passphrase().await;
     let (_, clients) = core.root.get("/v1/clients").await;
-    let plugin: Vec<&Value> =
-        clients["clients"].as_array().unwrap().iter().filter(|c| c["name"] == "ErisAuth").collect();
-    assert_eq!(plugin.len(), 1, "{clients}");
-    assert_eq!(plugin[0]["grants"], json!(["*"]));
+    let names: Vec<&Value> = clients["clients"].as_array().unwrap().iter().map(|c| &c["name"]).collect();
+    assert_eq!(names, [&json!("Phone")], "the plugin is no installation of its own");
 
     let (status, items) = core.root.get("/v1/items?facet=erisauth.passphrase").await;
     assert_eq!(status, 200, "{items}");
@@ -37,22 +42,17 @@ async fn setup_enrolls_the_plugin_and_keeps_only_a_hash_of_the_passphrase() {
     let stored = items[0]["body"].to_string();
     assert!(items[0]["body"]["passphrase"].as_str().unwrap().starts_with("$argon2id$"), "{stored}");
     assert!(!stored.contains(PASSPHRASE));
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let credential = std::fs::metadata(core.plugin_dir.join("erisdb.json")).unwrap();
-        assert_eq!(credential.permissions().mode() & 0o777, 0o600);
-    }
-
-    let (device, _) = core.enroll("Phone", DEVICE).await;
+    assert_eq!(items[0]["source"]["user"], "plugin:erisauth", "what it writes says it is the plugin's");
     assert_eq!(device.get("/v1/items?facet=erisauth.passphrase").await.0, 403, "a device cannot read the hash");
+
+    let (status, answer) = device.call("approve", approve(&pairing, &["notes:read"], &app, PASSPHRASE)).await;
+    assert_eq!(status, 200, "{answer}");
 }
 
 #[tokio::test]
 async fn a_device_approves_beyond_its_own_authority_with_the_passphrase() {
     let core = Core::start().await;
-    core.setup_plugin().await;
+    core.set_passphrase().await;
     let (device, _) = core.enroll("Phone", DEVICE).await;
     let ((pairing, code), _) = cut_with(&device).await;
     let (app, _) = core.redeem(&code, "Notes", &["notes:read"]).await;
@@ -73,7 +73,7 @@ async fn a_device_approves_beyond_its_own_authority_with_the_passphrase() {
 #[tokio::test]
 async fn wrong_passphrases_lock_that_device_out_and_only_that_device() {
     let core = Core::start().await;
-    core.setup_plugin().await;
+    core.set_passphrase().await;
     let (phone, phone_id) = core.enroll("Phone", DEVICE).await;
     let ((pairing, code), _) = cut_with(&phone).await;
     let (app, _) = core.redeem(&code, "Notes", &["notes:read"]).await;
@@ -97,8 +97,11 @@ async fn wrong_passphrases_lock_that_device_out_and_only_that_device() {
     let (status, answer) = laptop.call("approve", approve(&other, &["tasks:read"], &other_app, PASSPHRASE)).await;
     assert_eq!(status, 200, "another device is not locked: {answer}");
 
-    let output = core.run(&["unlock", &phone_id]).await;
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let (status, _) = phone.call("unlock", json!({"installation": phone_id})).await;
+    assert_eq!(status, 403, "a device does not unlock itself without erisauth:unlock");
+    let (admin, _) = core.enroll("Desk", &["erisauth:unlock"]).await;
+    let (status, answer) = admin.call("unlock", json!({"installation": phone_id})).await;
+    assert_eq!(status, 200, "{answer}");
     let (status, answer) = phone.call("approve", approve(&pairing, &["notes:read"], &app, PASSPHRASE)).await;
     assert_eq!(status, 200, "{answer}");
 }
@@ -106,7 +109,7 @@ async fn wrong_passphrases_lock_that_device_out_and_only_that_device() {
 #[tokio::test]
 async fn the_plugin_approves_only_the_app_the_device_vouched_for() {
     let core = Core::start().await;
-    core.setup_plugin().await;
+    core.set_passphrase().await;
     let (device, _) = core.enroll("Phone", DEVICE).await;
     let ((pairing, code), _) = cut_with(&device).await;
     let (_raced, _) = core.redeem(&code, "Notes", &["notes:read"]).await;
@@ -121,7 +124,7 @@ async fn the_plugin_approves_only_the_app_the_device_vouched_for() {
 #[tokio::test]
 async fn a_caller_that_is_not_an_installation_is_refused() {
     let core = Core::start().await;
-    core.setup_plugin().await;
+    core.set_passphrase().await;
     let (device, _) = core.enroll("Phone", DEVICE).await;
     let ((pairing, code), _) = cut_with(&device).await;
     let (app, _) = core.redeem(&code, "Notes", &["notes:read"]).await;
@@ -133,9 +136,9 @@ async fn a_caller_that_is_not_an_installation_is_refused() {
 }
 
 #[tokio::test]
-async fn the_passphrase_changes_from_a_device_or_on_the_server() {
+async fn the_passphrase_changes_with_the_old_one_or_resets_without_it() {
     let core = Core::start().await;
-    core.setup_plugin().await;
+    core.set_passphrase().await;
     let (device, _) = core.enroll("Phone", DEVICE).await;
 
     let (status, _) = device.call("passphrase", json!({"current": PASSPHRASE, "new": "short"})).await;
@@ -150,14 +153,13 @@ async fn the_passphrase_changes_from_a_device_or_on_the_server() {
     let (status, _) = device.call("approve", approve(&pairing, &["notes:read"], &app, PASSPHRASE)).await;
     assert_eq!(status, 403, "the old passphrase no longer works");
 
-    // Forgotten: whoever holds the server sets a new one without the old.
-    let mut child = core.erisauth(&["passphrase"]);
-    use tokio::io::AsyncWriteExt;
-    let mut stdin = child.stdin.take().unwrap();
-    stdin.write_all(b"set on the server\n").await.unwrap();
-    drop(stdin);
-    let output = child.wait_with_output().await.unwrap();
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    let (status, answer) = device.call("approve", approve(&pairing, &["notes:read"], &app, "set on the server")).await;
+    // Forgotten: whoever holds erisauth:reset sets a new one without the old.
+    let (status, _) = device.call("reset", json!({"new": "set without the old"})).await;
+    assert_eq!(status, 403, "an ordinary device does not hold erisauth:reset");
+    let (admin, _) = core.enroll("Desk", &["erisauth:reset"]).await;
+    let (status, answer) = admin.call("reset", json!({"new": "set without the old"})).await;
+    assert_eq!(status, 200, "{answer}");
+    let (status, answer) =
+        device.call("approve", approve(&pairing, &["notes:read"], &app, "set without the old")).await;
     assert_eq!(status, 200, "{answer}");
 }

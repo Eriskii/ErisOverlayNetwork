@@ -95,14 +95,11 @@ pub struct Core {
     pub secret: Vec<u8>,
     /// Where the core answers over Iroh.
     pub addr: iroh::EndpointAddr,
-    /// The plugin's state directory, as the manifest's `--dir` names it.
-    pub plugin_dir: PathBuf,
-    _dirs: tempfile::TempDir,
 }
 
 impl Core {
     /// A core in a fresh database, serving the shipped plugin manifest with
-    /// its executable and state directory pointed at this build and a temporary one.
+    /// its executable pointed at this build.
     pub async fn start() -> Self {
         let pg = pg().await;
         let db = format!("erisauth_{}", uuid::Uuid::new_v4().simple());
@@ -112,22 +109,18 @@ impl Core {
         let pool = PgPoolOptions::new().max_connections(8).connect(&format!("{}/{db}", pg.base_url)).await.unwrap();
         erisdb::MIGRATOR.run(&pool).await.unwrap();
 
-        let dirs = tempfile::tempdir().unwrap();
-        let plugins = dirs.path().join("plugins.d");
-        let plugin_dir = dirs.path().join("plugin");
-        std::fs::create_dir(&plugins).unwrap();
+        let plugins = tempfile::tempdir().unwrap();
         let shipped = Path::new(env!("CARGO_MANIFEST_DIR")).join("deploy/erisauth.json");
         let mut manifest: Value = serde_json::from_slice(&std::fs::read(shipped).unwrap()).unwrap();
         manifest["executable"] = json!(env!("CARGO_BIN_EXE_erisdb-plugin-erisauth"));
-        manifest["args"] = json!(["--dir", plugin_dir]);
-        std::fs::write(plugins.join("erisauth.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
-        let registry = erisdb::PluginRegistry::load_dir(&plugins).unwrap();
+        std::fs::write(plugins.path().join("erisauth.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let registry = erisdb::PluginRegistry::load_dir(plugins.path()).unwrap().reachable_at(&base);
 
         // Each core its own secret, so each has its own Iroh identity.
         let secret = uuid::Uuid::new_v4().as_bytes().to_vec();
         let app = erisdb::app_with_plugins(pool, secret.clone(), registry);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
         let tcp = app.clone();
         tokio::spawn(async move {
             axum::serve(listener, tcp.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap();
@@ -136,7 +129,7 @@ impl Core {
         let addr = erisdb::net::advertised_addr(&endpoint).await.unwrap();
         tokio::spawn(erisdb::net::serve(endpoint, app));
         let root = Caller::new(&base, &erisdb::auth::mint(&secret, &["*"], Some(3600), None).unwrap());
-        Core { base, root, secret, addr, plugin_dir, _dirs: dirs }
+        Core { base, root, secret, addr }
     }
 
     /// Cut a pairing as the root operator: its id and a ticket for it.
@@ -160,41 +153,10 @@ impl Core {
             .unwrap()
     }
 
-    /// Run `erisauth setup` for the plugin, approving its request as the operator would.
-    pub async fn setup_plugin(&self) -> std::process::Output {
-        let (id, ticket) = self.cut().await;
-        let mut child = self.erisauth(&["setup", "--erisdb", &self.base, &ticket]);
-        let mut stdin = child.stdin.take().unwrap();
-        stdin.write_all(format!("{PASSPHRASE}\n").as_bytes()).await.unwrap();
-        drop(stdin);
-        self.await_requested(&id).await;
-        let (status, approved) = self.root.post(&format!("/v1/pairings/{id}/approve"), json!({})).await;
-        assert_eq!(status, 200, "{approved}");
-        let output = tokio::time::timeout(Duration::from_secs(30), child.wait_with_output()).await.unwrap().unwrap();
-        assert!(output.status.success(), "setup failed: {}", String::from_utf8_lossy(&output.stderr));
-        output
-    }
-
-    /// An `erisauth` command run on the ErisDB machine, with the plugin's state directory.
-    pub fn erisauth(&self, args: &[&str]) -> tokio::process::Child {
-        let (first, rest) = args.split_at(1);
-        tokio::process::Command::new(env!("CARGO_BIN_EXE_erisauth"))
-            .args(first)
-            .arg("--dir")
-            .arg(&self.plugin_dir)
-            .args(rest)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .unwrap()
-    }
-
-    /// Run such a command to completion.
-    pub async fn run(&self, args: &[&str]) -> std::process::Output {
-        let child = self.erisauth(args);
-        tokio::time::timeout(Duration::from_secs(30), child.wait_with_output()).await.unwrap().unwrap()
+    /// Set the passphrase as the operator, who holds `erisauth:reset`.
+    pub async fn set_passphrase(&self) {
+        let (status, answer) = self.root.call("reset", json!({"new": PASSPHRASE})).await;
+        assert_eq!(status, 200, "{answer}");
     }
 
     pub async fn await_requested(&self, id: &str) {

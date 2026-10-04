@@ -12,6 +12,8 @@
 //! POST /api/approvals/{id}/deny     → {ok: true} or {error, message}
 //! POST /api/devices                 → {id, ticket, svg, expires}: a ticket a new device joins with
 //! POST /api/join                    {ticket, name, ceiling?} → {ok: true}; `joining` in the state follows it
+//! POST /api/passphrase              {current?, new} → {ok: true} or {error, message}; without `current`, a reset
+//! POST /api/unlock                  {installation?} → {ok: true} or {error, message}
 //! ```
 
 use std::path::Path;
@@ -64,7 +66,7 @@ pub async fn listen(
     let link = format!("http://{}/#token={token}", listener.local_addr()?);
     let path = link_path(runtime);
     super::private_dir(path.parent().context("the link has a directory")?)?;
-    crate::erisdb::write_private(&path, format!("{link}\n").as_bytes())?;
+    super::write_private(&path, format!("{link}\n").as_bytes())?;
 
     let page = Page { agent, token: Arc::new(token) };
     let api = Router::new()
@@ -73,6 +75,8 @@ pub async fn listen(
         .route("/api/approvals/{id}/deny", post(deny))
         .route("/api/devices", post(add))
         .route("/api/join", post(join))
+        .route("/api/passphrase", post(passphrase))
+        .route("/api/unlock", post(unlock))
         .route_layer(middleware::from_fn_with_state(page.clone(), authorize))
         .with_state(page);
     let app = Router::new()
@@ -145,6 +149,27 @@ async fn join(State(page): State<Page>, Json(body): Json<Join>) -> Json<serde_js
 
 async fn add(State(page): State<Page>) -> Json<serde_json::Value> {
     Json(page.agent.add().await)
+}
+
+#[derive(Deserialize)]
+struct Passphrase {
+    #[serde(default)]
+    current: Option<String>,
+    new: String,
+}
+
+async fn passphrase(State(page): State<Page>, Json(body): Json<Passphrase>) -> Json<serde_json::Value> {
+    Json(page.agent.passphrase(body.current.filter(|c| !c.is_empty()), body.new).await)
+}
+
+#[derive(Deserialize)]
+struct Unlock {
+    #[serde(default)]
+    installation: Option<Uuid>,
+}
+
+async fn unlock(State(page): State<Page>, Json(body): Json<Unlock>) -> Json<serde_json::Value> {
+    Json(page.agent.unlock(body.installation).await)
 }
 
 fn serve(path: &str) -> Response {

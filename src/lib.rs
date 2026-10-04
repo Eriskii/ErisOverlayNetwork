@@ -6,11 +6,10 @@
 //! person, and approves it: by itself within its ceiling, or through ErisAuth's
 //! [plugin] in ErisDB.
 //!
-//! The [plugin] holds full authority in ErisDB and approves a pending
-//! pairing for a registered ErisAuth device that brings the passphrase, so a
-//! device with little authority of its own can still approve what an app
-//! needs once the person proves they are there.
+//! The [plugin] approves a pending pairing for a registered ErisAuth device
+//! that brings the passphrase, so a device with little authority of its own
+//! can still approve what an app needs once the person proves they are
+//! there. It acts with the grants its manifest names, which each call brings.
 
 pub mod device;
-pub mod erisdb;
 pub mod plugin;

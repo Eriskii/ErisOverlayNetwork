@@ -1,20 +1,19 @@
-//! What ErisAuth's plugin keeps in ErisDB, and how it enrolls there.
+//! What ErisAuth's plugin keeps in ErisDB.
 //!
-//! The plugin is an ErisDB installation holding `*`, so it can approve
-//! anything a person asks for. It acts only for a registered ErisAuth device
-//! that brings the passphrase, which is how a device with little authority of its own
-//! still approves what an app needs: the device is something the person
-//! has, the passphrase something they know.
+//! The plugin acts with the grants its manifest names, `*` as shipped, so it
+//! can approve anything a person asks for. It approves only for a registered
+//! ErisAuth device that brings the passphrase, which is how a device with
+//! little authority of its own still approves what an app needs: the device
+//! is something the person has, the passphrase something they know.
 //!
 //! The passphrase is kept as an Argon2id hash in ErisDB's
 //! `erisauth.passphrase` facet, with each device's count of wrong guesses.
-//! Only the plugin and the operator can read that facet. After [`FREE_ATTEMPTS`] wrong guesses a
+//! Only the plugin and whoever holds that facet can read it. After [`FREE_ATTEMPTS`] wrong guesses a
 //! device waits a minute before it may guess again, then two, then four,
 //! doubling up to a day; a right guess clears its count. One device's
 //! guesses never lock another out.
 
 use std::collections::BTreeMap;
-use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng};
@@ -22,13 +21,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::erisdb::Session;
+use super::db::Db;
 
 /// The facet holding the passphrase hash and each device's lockout.
 pub const FACET: &str = "erisauth.passphrase";
-
-/// The name the plugin's installation goes by in ErisDB.
-pub const NAME: &str = "ErisAuth";
 
 /// Wrong guesses a device gets before it has to wait.
 pub const FREE_ATTEMPTS: u32 = 3;
@@ -119,8 +115,8 @@ pub struct Stored {
     pub state: State,
 }
 
-/// The plugin's state, or `None` before setup has stored a passphrase.
-pub async fn load(db: &mut Session) -> Result<Option<Stored>> {
+/// The plugin's state, or `None` before anyone has set a passphrase.
+pub async fn load(db: &Db) -> Result<Option<Stored>> {
     let (status, body) = db.get(&format!("/v1/items?facet={FACET}&limit=1")).await?;
     if status != 200 {
         bail!("reading {FACET} ({status}): {body}");
@@ -136,9 +132,9 @@ pub async fn load(db: &mut Session) -> Result<Option<Stored>> {
 /// Apply `change` to the stored state and save it, starting over from the
 /// current state when another writer got there first. Returns what `change`
 /// returned on the attempt that was saved.
-pub async fn update<T>(db: &mut Session, mut change: impl FnMut(&mut State) -> T) -> Result<T> {
+pub async fn update<T>(db: &Db, mut change: impl FnMut(&mut State) -> T) -> Result<T> {
     for _ in 0..16 {
-        let mut stored = load(db).await?.context("ErisAuth has no passphrase yet; run `erisauth setup`")?;
+        let mut stored = load(db).await?.context("ErisAuth has no passphrase yet")?;
         let out = change(&mut stored.state);
         let (status, body) = db
             .put(&format!("/v1/items/{}", stored.id), json!({"body": stored.state, "revision": stored.revision}))
@@ -153,7 +149,7 @@ pub async fn update<T>(db: &mut Session, mut change: impl FnMut(&mut State) -> T
 }
 
 /// Register the facet, unless it already is.
-pub async fn register(db: &mut Session) -> Result<()> {
+pub async fn register(db: &Db) -> Result<()> {
     let definition =
         json!({"facet": "facet", "body": {"name": FACET, "version": 1, "strict": true, "schema": schema()}});
     let (status, body) = db.post("/v1/items", definition).await?;
@@ -163,10 +159,13 @@ pub async fn register(db: &mut Session) -> Result<()> {
     }
 }
 
-/// Store `passphrase` as the one the plugin checks, keeping each device's lockout.
-pub async fn set_passphrase(db: &mut Session, passphrase: &str) -> Result<()> {
+/// Store `passphrase` as the one the plugin checks: the first time, or in
+/// place of the old one. A reset starts every device's count of wrong guesses
+/// afresh; a change keeps them.
+pub async fn set_passphrase(db: &Db, passphrase: &str, reset: bool) -> Result<()> {
     let hashed = hash(passphrase)?;
     if load(db).await?.is_none() {
+        register(db).await?;
         let state = State { passphrase: hashed, lockouts: BTreeMap::new() };
         let (status, body) = db.post("/v1/items", json!({"facet": FACET, "body": state})).await?;
         if status != 201 {
@@ -174,11 +173,21 @@ pub async fn set_passphrase(db: &mut Session, passphrase: &str) -> Result<()> {
         }
         return Ok(());
     }
-    update(db, |state| state.passphrase = hashed.clone()).await
+    update(db, |state| {
+        state.passphrase = hashed.clone();
+        if reset {
+            state.lockouts.clear();
+        }
+    })
+    .await
 }
 
-/// Let `installation` guess again now, or every device when `None`.
-pub async fn unlock(db: &mut Session, installation: Option<Uuid>) -> Result<()> {
+/// Let `installation` guess again now, or every device when `None`. Before
+/// there is a passphrase, nobody is locked out.
+pub async fn unlock(db: &Db, installation: Option<Uuid>) -> Result<()> {
+    if load(db).await?.is_none() {
+        return Ok(());
+    }
     update(db, |state| match installation {
         Some(id) => {
             state.lockouts.remove(&id);
@@ -195,13 +204,15 @@ pub enum Guess {
     Wrong,
     /// This device has to wait this many seconds before guessing.
     Locked(i64),
+    /// There is no passphrase to guess yet.
+    Unset,
 }
 
 /// Check `passphrase` for `installation`, counting a wrong guess against it
 /// and clearing its count on a right one. A locked device's guess is not
 /// even checked.
-pub async fn guess(db: &mut Session, installation: Uuid, passphrase: &str) -> Result<Guess> {
-    let stored = load(db).await?.context("ErisAuth has no passphrase yet; run `erisauth setup`")?;
+pub async fn guess(db: &Db, installation: Uuid, passphrase: &str) -> Result<Guess> {
+    let Some(stored) = load(db).await? else { return Ok(Guess::Unset) };
     let now = erislogin::now();
     let lockout = stored.state.lockouts.get(&installation).copied().unwrap_or_default();
     if let Some(wait) = lockout.wait(now) {
@@ -220,58 +231,4 @@ pub async fn guess(db: &mut Session, installation: Uuid, passphrase: &str) -> Re
     })
     .await?;
     Ok(if right { Guess::Right } else { Guess::Wrong })
-}
-
-/// Enroll the plugin with the core a ticket names, reached at `url`, asking for
-/// everything. `said` hears what to show the operator while they decide.
-pub async fn enroll(dir: &Path, url: &str, ticket: &str, mut said: impl FnMut(&str)) -> Result<()> {
-    let ticket = erislogin::ticket::Ticket::parse("erisdb", ticket)?;
-    let url = url.trim_end_matches('/').to_string();
-    let (proof, challenge) = crate::erisdb::new_proof();
-    let http = crate::erisdb::http();
-    let response = http
-        .post(format!("{url}/v1/pair/redeem"))
-        .bearer_auth(&ticket.token)
-        .json(&json!({"client": NAME, "requested": ["*"], "challenge": challenge}))
-        .send()
-        .await
-        .with_context(|| format!("reaching ErisDB at {url}"))?;
-    let status = response.status();
-    let session: Value = response.json().await.unwrap_or(Value::Null);
-    if !status.is_success() {
-        bail!("ErisDB refused the ticket ({status}): {session}");
-    }
-    let fingerprint = session["body"]["fingerprint"].as_str().context("ErisDB sent no fingerprint")?;
-    said(&format!("Compare this code with the approving terminal: {fingerprint}"));
-    said("ErisAuth asks for every permission (*), so that it can approve anything you ask it to.");
-
-    let deadline = session["body"]["expires"].as_i64().unwrap_or(erislogin::now() + 600);
-    loop {
-        if erislogin::now() >= deadline {
-            bail!("the pairing expired before it was approved");
-        }
-        let reply: Value = http
-            .get(format!("{url}/v1/pair/status"))
-            .bearer_auth(&ticket.token)
-            .header(crate::erisdb::PROOF_HEADER, &proof)
-            .send()
-            .await?
-            .json()
-            .await?;
-        match reply["status"].as_str() {
-            Some("approved") => {
-                let credential = crate::erisdb::Credential {
-                    url,
-                    client_id: reply["client_id"].as_str().and_then(|id| id.parse().ok()).context("no client id")?,
-                    proof,
-                    token: reply["token"].as_str().context("no token")?.to_string(),
-                };
-                credential.save(dir)?;
-                return Ok(());
-            }
-            Some("denied") => bail!("the operator denied ErisAuth home"),
-            Some("pending" | "requested") => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
-            _ => bail!("ErisDB answered the pairing with {reply}"),
-        }
-    }
 }

@@ -204,3 +204,32 @@ async fn a_device_joins_from_its_page() {
     );
     assert_eq!(asking.answer().await.unwrap(), Answer::Approved(vec!["notes:read".into()]));
 }
+
+#[tokio::test]
+async fn the_passphrase_is_set_and_devices_unlocked_on_the_page() {
+    let core = Core::start().await;
+    let mut device = Device::new();
+    device.join(&core, "Laptop", &["*"]).await;
+    device.serve().await;
+    let (base, token) = page(&device);
+    let http = reqwest::Client::new();
+    let post =
+        |path: &str, body: serde_json::Value| http.post(format!("{base}{path}")).bearer_auth(&token).json(&body).send();
+    assert_eq!(
+        http.post(format!("{base}/api/passphrase")).json(&json!({"new": "x"})).send().await.unwrap().status(),
+        401
+    );
+
+    let set: serde_json::Value =
+        post("/api/passphrase", json!({"new": support::PASSPHRASE})).await.unwrap().json().await.unwrap();
+    assert_eq!(set, json!({"ok": true}));
+    let wrong: serde_json::Value = post("/api/passphrase", json!({"current": "guess", "new": "a new passphrase"}))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(wrong["error"], "wrong_passphrase", "{wrong}");
+    let unlocked: serde_json::Value = post("/api/unlock", json!({})).await.unwrap().json().await.unwrap();
+    assert_eq!(unlocked, json!({"ok": true}));
+}

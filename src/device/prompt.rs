@@ -1,5 +1,6 @@
 //! Answering at a terminal: `erisauth approvals` for requests as they
-//! arrive, and `erisauth add` to show a ticket a new device joins with.
+//! arrive, `erisauth add` to show a ticket a new device joins with, and
+//! `erisauth passphrase` and `erisauth unlock` to look after the passphrase.
 
 use std::collections::HashSet;
 use std::io::{IsTerminal, Write};
@@ -52,6 +53,55 @@ pub async fn add(paths: &Paths) -> Result<()> {
     answer_each(paths, &mut out, Some(id), true).await
 }
 
+/// A passphrase typed at the terminal without echo, or one line of piped input.
+fn secret(label: &str) -> Result<String> {
+    if !std::io::stdin().is_terminal() {
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        return Ok(line.trim_end_matches(['\r', '\n']).to_string());
+    }
+    Ok(rpassword::prompt_password(label)?)
+}
+
+/// A new passphrase: typed twice at a terminal, or one line of piped input.
+fn new_secret() -> Result<String> {
+    if !std::io::stdin().is_terminal() {
+        return secret("");
+    }
+    loop {
+        let first = secret("New passphrase: ")?;
+        if secret("Again: ")? == first {
+            return Ok(first);
+        }
+        eprintln!("Those differ; once more.");
+    }
+}
+
+/// Change the passphrase, or with `reset`, set it without the current one.
+pub async fn passphrase(paths: &Paths, reset: bool) -> Result<()> {
+    let current = if reset { None } else { Some(secret("Current passphrase: ")?) };
+    let new = new_secret()?;
+    let answer = say(paths, json!({"op": "passphrase", "current": current, "new": new})).await?;
+    if let Some(why) = answer["message"].as_str() {
+        bail!("{why}");
+    }
+    println!("The passphrase is set.");
+    Ok(())
+}
+
+/// Let a device, or every device, guess the passphrase again now.
+pub async fn unlock(paths: &Paths, installation: Option<uuid::Uuid>) -> Result<()> {
+    let answer = say(paths, json!({"op": "unlock", "installation": installation})).await?;
+    if let Some(why) = answer["message"].as_str() {
+        bail!("{why}");
+    }
+    match installation {
+        Some(id) => println!("{id} may guess again."),
+        None => println!("Every device may guess again."),
+    }
+    Ok(())
+}
+
 /// Put each waiting request to the person, or only request `only`.
 async fn answer_each(paths: &Paths, out: &mut impl Write, only: Option<String>, once: bool) -> Result<()> {
     let (read, mut write) = connect(paths).await?.into_split();
@@ -80,7 +130,7 @@ fn strings(value: &Value) -> Vec<String> {
     value.as_array().into_iter().flatten().filter_map(|v| v.as_str().map(str::to_string)).collect()
 }
 
-async fn passphrase(lines: &mut UnboundedReceiver<String>, expires: i64) -> Result<String> {
+async fn ask_passphrase(lines: &mut UnboundedReceiver<String>, expires: i64) -> Result<String> {
     if std::io::stdin().is_terminal() {
         return Ok(tokio::task::spawn_blocking(|| rpassword::prompt_password("Passphrase: ")).await??);
     }
@@ -144,7 +194,7 @@ async fn answer(
                 return Ok(());
             }
         }
-        given = Some(passphrase(lines, expires).await?);
+        given = Some(ask_passphrase(lines, expires).await?);
     }
     writeln!(out, "The request stays open; answer it again with `erisauth approvals`.")?;
     Ok(())

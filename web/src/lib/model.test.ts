@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { covers, encloses, needsPassphrase, parseCeiling, remaining, takeToken } from './model';
+import { covers, encloses, needsPassphrase, parseCeiling, passphraseProblem, remaining, takeToken } from './model';
 
 describe('grants', () => {
   it('match as ErisLogin matches them', () => {
@@ -51,3 +51,24 @@ describe('parseCeiling', () => {
     expect(parseCeiling('  ')).toEqual(['*']);
   });
 });
+
+describe('passphrase answers', () => {
+  it('say what went wrong in words, and nothing when it went right', () => {
+    expect(passphraseProblem({ ok: true }, 'change')).toBe('');
+    expect(passphraseProblem({ error: 'wrong_passphrase' }, 'change')).toBe('That is not the current passphrase.');
+    expect(passphraseProblem({ error: 'forbidden' }, 'reset')).toBe(
+      'This device may not set the passphrase without the current one.',
+    );
+    expect(passphraseProblem({ error: 'forbidden' }, 'unlock')).toBe('This device may not unlock devices.');
+    expect(passphraseProblem({ error: 'locked', retry_after: 125 }, 'change')).toBe(
+      'Too many wrong passphrases from this device; it may try again in 2:05.',
+    );
+    expect(passphraseProblem({ error: 'no_passphrase' }, 'change')).toBe(
+      'There is no passphrase yet; leave the current one empty to set the first.',
+    );
+    expect(passphraseProblem({ error: 'unreachable', message: 'ErisDB is not answering' }, 'reset')).toBe(
+      'ErisDB is not answering',
+    );
+  });
+});
+

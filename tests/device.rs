@@ -11,13 +11,8 @@ use serde_json::{Value, json};
 use support::{App, Core, Device, PASSPHRASE};
 
 /// What a device asks for besides its ceiling.
-const BASE: &[&str] = &[
-    "meta:pairing:create",
-    "meta:pairing:read",
-    "meta:pairing:approve",
-    "erisauth:approve",
-    "erisauth:passphrase",
-];
+const BASE: &[&str] =
+    &["meta:pairing:create", "meta:pairing:read", "meta:pairing:approve", "erisauth:approve", "erisauth:passphrase"];
 
 async fn collect(client: &erisdb_client::Client) -> Vec<String> {
     match client.await_pairing(Duration::from_secs(30), &Cancel::new()).await.unwrap() {
@@ -67,7 +62,7 @@ async fn a_device_joins_then_approves_an_app_inside_its_ceiling() {
 #[tokio::test]
 async fn beyond_its_ceiling_a_device_asks_erisauth_in_erisdb_with_the_passphrase() {
     let core = Core::start().await;
-    core.setup_plugin().await;
+    core.set_passphrase().await;
     let mut device = Device::new();
     device.join(&core, "Phone", &["notes:read"]).await;
     device.serve().await;
@@ -189,7 +184,7 @@ async fn an_app_on_a_device_that_has_not_joined_hears_why() {
 }
 
 #[tokio::test]
-async fn beyond_its_ceiling_without_the_plugin_the_person_hears_why() {
+async fn beyond_its_ceiling_before_there_is_a_passphrase_the_person_hears_why() {
     let core = Core::start().await;
     let mut device = Device::new();
     device.join(&core, "Phone", &["notes:read"]).await;
@@ -203,8 +198,8 @@ async fn beyond_its_ceiling_without_the_plugin_the_person_hears_why() {
     let answer = device
         .say(json!({"op": "decide", "id": approval["id"], "granted": ["tasks:read"], "passphrase": PASSPHRASE}))
         .await;
-    assert_eq!(answer["error"], "not_set_up", "{answer}");
-    assert!(answer["message"].as_str().unwrap().contains("erisauth setup"), "{answer}");
+    assert_eq!(answer["error"], "no_passphrase", "{answer}");
+    assert!(answer["message"].as_str().unwrap().contains("erisauth:reset"), "{answer}");
     assert_eq!(device.approvals().await.len(), 1, "the request stays open");
 }
 
@@ -246,4 +241,39 @@ async fn an_app_signs_in_with_one_call_and_then_talks_to_erisdb_directly() {
     let (_, clients) = core.root.get("/v1/clients").await;
     let notes = clients["clients"].as_array().unwrap().iter().find(|c| c["name"] == "Notes").unwrap();
     assert_eq!(notes["identity"]["key"], json!(iroh::SecretKey::from_bytes(&key).public().to_string()));
+}
+
+/// The passphrase is the person's, so it is set, changed and unlocked from a
+/// device: the first time without an old one, by a device whose ceiling
+/// covers `erisauth:reset`.
+#[tokio::test]
+async fn the_passphrase_is_set_changed_and_unlocked_from_a_device() {
+    let core = Core::start().await;
+    let mut phone = Device::new();
+    phone.join(&core, "Phone", &["*"]).await;
+    phone.serve().await;
+
+    assert_eq!(phone.say(json!({"op": "passphrase", "new": PASSPHRASE})).await, json!({"ok": true}));
+    let wrong = phone.say(json!({"op": "passphrase", "current": "guess", "new": "a new passphrase"})).await;
+    assert_eq!(wrong["error"], "wrong_passphrase", "{wrong}");
+    let changed = phone.say(json!({"op": "passphrase", "current": PASSPHRASE, "new": "a new passphrase"})).await;
+    assert_eq!(changed, json!({"ok": true}));
+    assert_eq!(phone.say(json!({"op": "unlock"})).await, json!({"ok": true}));
+
+    let mut tablet = Device::new();
+    tablet.join(&core, "Tablet", &["notes:read"]).await;
+    tablet.serve().await;
+    let refused = tablet.say(json!({"op": "passphrase", "new": "taken over"})).await;
+    assert_eq!(refused["error"], "forbidden", "a device that may not reset does not: {refused}");
+
+    // At a terminal: the new passphrase on stdin, without the old one.
+    let mut reset = phone.command(&["passphrase", "--reset"]).spawn().unwrap();
+    use tokio::io::AsyncWriteExt;
+    reset.stdin.take().unwrap().write_all(b"typed at a terminal\n").await.unwrap();
+    let output = reset.wait_with_output().await.unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let unlocked = phone.command(&["unlock"]).output().await.unwrap();
+    assert!(unlocked.status.success(), "{}", String::from_utf8_lossy(&unlocked.stderr));
+    let changed = phone.say(json!({"op": "passphrase", "current": "typed at a terminal", "new": PASSPHRASE})).await;
+    assert_eq!(changed, json!({"ok": true}));
 }

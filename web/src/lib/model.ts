@@ -43,3 +43,28 @@ export function parseCeiling(typed: string): string[] {
   const grants = typed.split(/[\s,]+/).filter(Boolean);
   return grants.length ? grants : ['*'];
 }
+
+/** What the person was doing with the passphrase. */
+export type PassphraseAction = 'change' | 'reset' | 'unlock';
+
+/** What went wrong with a passphrase request, in words; empty when nothing did. */
+export function passphraseProblem(
+  outcome: { ok?: true; error?: string; message?: string; retry_after?: number },
+  action: PassphraseAction,
+): string {
+  if (outcome.ok) return '';
+  switch (outcome.error) {
+    case 'wrong_passphrase':
+      return 'That is not the current passphrase.';
+    case 'forbidden':
+      return action === 'unlock'
+        ? 'This device may not unlock devices.'
+        : 'This device may not set the passphrase without the current one.';
+    case 'locked':
+      return `Too many wrong passphrases from this device; it may try again in ${remaining(outcome.retry_after ?? 0, 0)}.`;
+    case 'no_passphrase':
+      return 'There is no passphrase yet; leave the current one empty to set the first.';
+    default:
+      return outcome.message ?? outcome.error ?? 'ErisAuth could not do that.';
+  }
+}

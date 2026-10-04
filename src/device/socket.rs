@@ -11,6 +11,8 @@
 //! {"op":"decide","id":…,"granted":[…],"passphrase":…} → {"ok":true} or {"error":…}
 //! {"op":"deny","id":…}                                → {"ok":true} or {"error":…}
 //! {"op":"add"}                                        → {"id","ticket","svg","expires"}: a new device joins with it
+//! {"op":"passphrase","current":…,"new":…}             → {"ok":true} or {"error":…}; without `current`, a reset
+//! {"op":"unlock","installation":…}                    → {"ok":true} or {"error":…}; every device without one
 //! ```
 //!
 //! Any process of this user can connect, as it can read the device's key.
@@ -80,6 +82,19 @@ struct Decide {
 }
 
 #[derive(Deserialize)]
+struct Passphrase {
+    #[serde(default)]
+    current: Option<String>,
+    new: String,
+}
+
+#[derive(Deserialize)]
+struct Unlock {
+    #[serde(default)]
+    installation: Option<Uuid>,
+}
+
+#[derive(Deserialize)]
 struct Deny {
     id: Uuid,
 }
@@ -138,6 +153,14 @@ async fn connection(stream: UnixStream, agent: Arc<Agent>) -> Result<()> {
         },
         Some("deny") => match serde_json::from_value::<Deny>(message) {
             Ok(d) => send(&mut write, &agent.deny(d.id)).await,
+            Err(e) => send(&mut write, &json!({"error": "bad_request", "message": e.to_string()})).await,
+        },
+        Some("passphrase") => match serde_json::from_value::<Passphrase>(message) {
+            Ok(p) => send(&mut write, &agent.passphrase(p.current, p.new).await).await,
+            Err(e) => send(&mut write, &json!({"error": "bad_request", "message": e.to_string()})).await,
+        },
+        Some("unlock") => match serde_json::from_value::<Unlock>(message) {
+            Ok(u) => send(&mut write, &agent.unlock(u.installation).await).await,
             Err(e) => send(&mut write, &json!({"error": "bad_request", "message": e.to_string()})).await,
         },
         other => send(&mut write, &json!({"error": "bad_request", "message": format!("no operation {other:?}")})).await,

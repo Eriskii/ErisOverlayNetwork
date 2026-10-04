@@ -56,6 +56,13 @@ export const add = (bearer: string) => call<Added>('POST', './api/devices', bear
 export const join = (bearer: string, ticket: string, name: string, ceiling: string[]) =>
   call<Outcome>('POST', './api/join', bearer, { ticket, name, ceiling });
 
+/** Change the passphrase with the current one; without it, reset it, which only some devices may. */
+export const passphrase = (bearer: string, current: string, next: string) =>
+  call<Outcome>('POST', './api/passphrase', bearer, current ? { current, new: next } : { new: next });
+
+/** Let every device guess the passphrase again now. */
+export const unlock = (bearer: string) => call<Outcome>('POST', './api/unlock', bearer, {});
+
 /** A ticket handed over in the fragment as `join=`, taken out of the address bar. */
 export function ticketFromFragment(): string | null {
   const params = new URLSearchParams(location.hash.replace(/^#/, ''));

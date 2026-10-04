@@ -22,13 +22,8 @@ use serde::{Deserialize, Serialize};
 
 /// What a device holds besides its ceiling: opening and approving pairings,
 /// and asking ErisAuth in ErisDB.
-pub const BASE: [&str; 5] = [
-    "meta:pairing:create",
-    "meta:pairing:read",
-    "meta:pairing:approve",
-    "erisauth:approve",
-    "erisauth:passphrase",
-];
+pub const BASE: [&str; 5] =
+    ["meta:pairing:create", "meta:pairing:read", "meta:pairing:approve", "erisauth:approve", "erisauth:passphrase"];
 
 /// Where a device keeps its key and its standing with ErisDB, and where it listens.
 #[derive(Debug, Clone)]
@@ -88,7 +83,7 @@ impl Joined {
     }
 
     pub fn save(&self, paths: &Paths) -> Result<()> {
-        crate::erisdb::write_private(&paths.device(), &serde_json::to_vec_pretty(self)?)
+        write_private(&paths.device(), &serde_json::to_vec_pretty(self)?)
     }
 
     /// The name this device's installation goes by in ErisDB.
@@ -188,6 +183,23 @@ pub fn open(link: &str) {
     if let Err(e) = std::process::Command::new("xdg-open").arg(link).status() {
         eprintln!("erisauth: could not open {link}: {e}");
     }
+}
+
+/// Write `bytes` to `path`, readable only by its owner, replacing any file there atomically.
+pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let dir = path.parent().context("a private file's path has a directory")?;
+    private_dir(dir)?;
+    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(&tmp)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
 }
 
 /// Create `dir` readable only by its owner.

@@ -4,6 +4,7 @@
   import AddDevice from '$lib/components/AddDevice.svelte';
   import ApprovalCard from '$lib/components/ApprovalCard.svelte';
   import JoinForm from '$lib/components/JoinForm.svelte';
+  import Passphrase from '$lib/components/Passphrase.svelte';
   import type { State } from '$lib/types';
 
   let bearer = $state<string | null>(null);
@@ -102,6 +103,7 @@
 
   {#if current?.device.joined && bearer && !problem}
     <AddDevice {bearer} {now} waiting={approvals.map((a) => a.id)} />
+    <Passphrase {bearer} />
   {/if}
 </main>
 

@@ -133,6 +133,26 @@ fn failed(error: &str, message: impl Into<String>) -> Outcome {
     json!({"error": error, "message": message.into()})
 }
 
+/// What ErisDB or the plugin refused, as the person's tools hear it. The
+/// plugin says `message`; ErisDB itself says `detail`.
+fn refusal(status: u16, body: &Value) -> Outcome {
+    let message = body["message"].as_str().or(body["detail"].as_str()).map(str::to_string);
+    let message = message.unwrap_or_else(|| format!("ErisDB refused ({status}): {body}"));
+    match body["error"].as_str() {
+        Some("plugin_not_found") => {
+            failed("not_set_up", "ErisDB has no ErisAuth plugin to ask; put its manifest in ErisDB's plugins folder")
+        }
+        Some(error) => {
+            let mut refusal = failed(error, message);
+            if let Some(wait) = body["retry_after"].as_i64() {
+                refusal["retry_after"] = json!(wait);
+            }
+            refusal
+        }
+        None => failed("refused", message),
+    }
+}
+
 impl Agent {
     pub fn new(paths: super::Paths, notify: bool) -> Arc<Self> {
         Arc::new(Agent {
@@ -533,25 +553,44 @@ impl Agent {
         }
         .unwrap_or_else(|e| (0, json!({"error": "unreachable", "message": format!("{e:#}")})));
         if status != 200 {
-            // The plugin says `message`; ErisDB itself says `detail`.
-            let message = body["message"].as_str().or(body["detail"].as_str()).map(str::to_string);
-            let message = message.unwrap_or_else(|| format!("ErisDB refused ({status}): {body}"));
-            return match body["error"].as_str() {
-                Some("plugin_not_found") => failed(
-                    "not_set_up",
-                    "ErisDB has no ErisAuth plugin to ask; install it and run `erisauth setup` on the ErisDB machine",
-                ),
-                Some(error) => {
-                    let mut refusal = failed(error, message);
-                    if let Some(wait) = body["retry_after"].as_i64() {
-                        refusal["retry_after"] = json!(wait);
-                    }
-                    refusal
-                }
-                None => failed("refused", message),
-            };
+            return refusal(status, &body);
         }
         self.decide_now(id, Decision::Approved(granted));
+        json!({"ok": true})
+    }
+
+    /// Set the passphrase. With the current one it is a change, which any
+    /// ErisAuth device may make; without it, a reset, which only a device
+    /// holding `erisauth:reset` may make, and which is how the first
+    /// passphrase is set.
+    pub async fn passphrase(&self, current: Option<String>, new: String) -> Outcome {
+        match current {
+            Some(current) => self.ask_plugin("passphrase", json!({"current": current, "new": new})).await,
+            None => self.ask_plugin("reset", json!({"new": new})).await,
+        }
+    }
+
+    /// Let a device, or every device when `None`, guess the passphrase again
+    /// now. This device needs `erisauth:unlock`.
+    pub async fn unlock(&self, installation: Option<Uuid>) -> Outcome {
+        let input = match installation {
+            Some(id) => json!({"installation": id}),
+            None => json!({}),
+        };
+        self.ask_plugin("unlock", input).await
+    }
+
+    async fn ask_plugin(&self, operation: &str, input: Value) -> Outcome {
+        let Some(Standing { db, .. }) = self.standing() else {
+            return failed("not_joined", "this device has not joined ErisDB");
+        };
+        let (status, body) = db
+            .call_plugin("erisauth", operation, input)
+            .await
+            .unwrap_or_else(|e| (0, json!({"error": "unreachable", "message": format!("{e:#}")})));
+        if status != 200 {
+            return refusal(status, &body);
+        }
         json!({"ok": true})
     }
 

@@ -1,17 +1,17 @@
 //! The plugin's side of ErisDB's one-shot process protocol: one invocation
 //! on stdin, one answer on stdout. ErisDB has already checked the caller's
-//! permission for the operation and the input against its schema.
-
-use std::path::Path;
+//! permission for the operation and the input against its schema, and hands
+//! the plugin, with each call, a capability for the grants its manifest names.
 
 use anyhow::Result;
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::erisdb::Session;
-
+pub mod db;
 pub mod state;
+use self::db::{Access, Db};
 use self::state::Guess;
 
 #[derive(Debug, Deserialize)]
@@ -27,6 +27,8 @@ pub struct Invocation {
 pub struct Context {
     /// The registered installation that called, as ErisDB authenticated it.
     pub installation: Option<Uuid>,
+    /// The core, and a capability for this call.
+    pub erisdb: Option<Access>,
 }
 
 /// An answer: an HTTP status and a JSON body.
@@ -50,27 +52,66 @@ struct Change {
     new: String,
 }
 
-/// Answer one invocation, with the plugin's state in `dir`.
-pub async fn answer(dir: &Path, invocation: Invocation) -> Result<Answer> {
+#[derive(Deserialize)]
+struct Reset {
+    new: String,
+}
+
+#[derive(Deserialize)]
+struct Unlock {
+    installation: Option<Uuid>,
+}
+
+/// Answer one invocation.
+pub async fn answer(invocation: Invocation) -> Result<Answer> {
     if invocation.protocol != 1 {
         return Ok(refuse(400, "protocol", "this plugin speaks protocol 1"));
     }
-    let Some(installation) = invocation.context.installation else {
-        return Ok(refuse(403, "not_a_device", "only a registered ErisAuth device can ask home"));
-    };
-    if !crate::erisdb::Credential::exists(dir) {
+    let Some(access) = invocation.context.erisdb else {
         return Ok(refuse(
             503,
-            "not_set_up",
-            "ErisAuth is not set up in ErisDB; run `erisauth setup` on the ErisDB machine",
+            "no_grants",
+            "ErisDB handed ErisAuth no capability; its manifest names the grants it acts with",
         ));
-    }
-    let mut db = Session::open(dir)?;
+    };
+    let db = Db::new(access);
+    let installation = invocation.context.installation;
+    let input = invocation.input;
     match invocation.operation.as_str() {
-        "approve" => approve(&mut db, installation, serde_json::from_value(invocation.input)?).await,
-        "passphrase" => change(&mut db, installation, serde_json::from_value(invocation.input)?).await,
+        "approve" => match (installation, read::<Approve>(input)) {
+            (None, _) => Ok(not_a_device()),
+            (_, Err(refusal)) => Ok(refusal),
+            (Some(installation), Ok(ask)) => approve(&db, installation, ask).await,
+        },
+        "passphrase" => match (installation, read::<Change>(input)) {
+            (None, _) => Ok(not_a_device()),
+            (_, Err(refusal)) => Ok(refusal),
+            (Some(installation), Ok(ask)) => change(&db, installation, ask).await,
+        },
+        "reset" => match read::<Reset>(input) {
+            Err(refusal) => Ok(refusal),
+            Ok(ask) => {
+                state::set_passphrase(&db, &ask.new, true).await?;
+                Ok((200, json!({"reset": true})))
+            }
+        },
+        "unlock" => match read::<Unlock>(input) {
+            Err(refusal) => Ok(refusal),
+            Ok(ask) => {
+                state::unlock(&db, ask.installation).await?;
+                Ok((200, json!({"unlocked": true})))
+            }
+        },
         other => Ok(refuse(404, "unknown_operation", &format!("ErisAuth has no operation {other:?}"))),
     }
+}
+
+fn read<T: DeserializeOwned>(input: Value) -> Result<T, Answer> {
+    serde_json::from_value(input).map_err(|e| refuse(400, "bad_input", &e.to_string()))
+}
+
+fn not_a_device() -> Answer {
+    refuse(403, "not_a_device", "only a registered ErisAuth device guesses the passphrase")
 }
 
 /// A refusal for a guess that was not right, or `None` to go on.
@@ -82,10 +123,15 @@ fn guessed(guess: Guess) -> Option<Answer> {
             429,
             json!({"error": "locked", "message": "too many wrong passphrases from this device", "retry_after": wait}),
         )),
+        Guess::Unset => Some(refuse(
+            503,
+            "no_passphrase",
+            "ErisAuth has no passphrase yet; set one from a device that holds erisauth:reset",
+        )),
     }
 }
 
-async fn approve(db: &mut Session, installation: Uuid, ask: Approve) -> Result<Answer> {
+async fn approve(db: &Db, installation: Uuid, ask: Approve) -> Result<Answer> {
     if let Some(refusal) = guessed(state::guess(db, installation, &ask.passphrase).await?) {
         return Ok(refusal);
     }
@@ -116,10 +162,10 @@ async fn approve(db: &mut Session, installation: Uuid, ask: Approve) -> Result<A
     Ok((200, json!({"approved": ask.granted})))
 }
 
-async fn change(db: &mut Session, installation: Uuid, ask: Change) -> Result<Answer> {
+async fn change(db: &Db, installation: Uuid, ask: Change) -> Result<Answer> {
     if let Some(refusal) = guessed(state::guess(db, installation, &ask.current).await?) {
         return Ok(refusal);
     }
-    state::set_passphrase(db, &ask.new).await?;
+    state::set_passphrase(db, &ask.new, false).await?;
     Ok((200, json!({"changed": true})))
 }

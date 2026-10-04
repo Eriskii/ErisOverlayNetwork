@@ -1,17 +1,10 @@
-//! `erisauth`: join a device, serve apps on it, and answer their requests;
-//! and, on the ErisDB machine, set up and look after ErisAuth's plugin there.
+//! `erisauth`: join a device, serve apps on it, answer their requests, and
+//! look after the passphrase.
 
-use std::io::IsTerminal;
-use std::path::PathBuf;
-
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
-use erisauth::plugin::state;
-use erisauth::{device, erisdb::Session};
+use erisauth::device;
 use uuid::Uuid;
-
-/// Where the plugin keeps its ErisDB credential, as the shipped manifest names it.
-const DIR: &str = "/var/lib/erisauth";
 
 #[derive(Parser)]
 #[command(version, about = "Sign apps in to Eris services from a device you already trust")]
@@ -51,51 +44,19 @@ enum Command {
         #[arg(long)]
         once: bool,
     },
-    /// On the ErisDB machine: enroll ErisAuth's plugin with ErisDB, register
-    /// its facet, and set the passphrase. Cut the ticket with `erisdb pair`
-    /// and approve the request there.
-    Setup {
-        /// The plugin's state directory: the `--dir` in its manifest.
-        #[arg(long, default_value = DIR)]
-        dir: PathBuf,
-        /// ErisDB's loopback URL; the plugin proves itself to the core over it.
-        #[arg(long, default_value = "http://127.0.0.1:7700")]
-        erisdb: String,
-        /// The `erisdb://pair/…` ticket.
-        ticket: String,
-    },
-    /// On the ErisDB machine: set a new passphrase without the old one.
+    /// Change the passphrase, typing the current one; with `--reset`, set it
+    /// without, which this device needs `erisauth:reset` for. That is how the
+    /// first passphrase is set.
     Passphrase {
-        #[arg(long, default_value = DIR)]
-        dir: PathBuf,
+        #[arg(long)]
+        reset: bool,
     },
-    /// On the ErisDB machine: let a device, or every device, guess the passphrase again now.
+    /// Let a device, or every device, guess the passphrase again now. This
+    /// device needs `erisauth:unlock`.
     Unlock {
-        #[arg(long, default_value = DIR)]
-        dir: PathBuf,
         /// The device's ErisDB installation id; every device when omitted.
         installation: Option<Uuid>,
     },
-}
-
-/// A new passphrase: typed twice at a terminal, or one line of piped input.
-fn new_passphrase() -> Result<String> {
-    if !std::io::stdin().is_terminal() {
-        let mut line = String::new();
-        std::io::stdin().read_line(&mut line)?;
-        return Ok(line.trim_end_matches(['\r', '\n']).to_string());
-    }
-    loop {
-        let first = rpassword::prompt_password("New passphrase: ")?;
-        if first.chars().count() < state::MIN_PASSPHRASE {
-            eprintln!("A passphrase has at least {} characters.", state::MIN_PASSPHRASE);
-            continue;
-        }
-        if rpassword::prompt_password("Again: ")? == first {
-            return Ok(first);
-        }
-        eprintln!("Those differ; once more.");
-    }
 }
 
 #[tokio::main]
@@ -124,33 +85,8 @@ async fn main() -> Result<()> {
             device::open(&link);
         }
         Command::Approvals { once } => device::prompt::run(&device::Paths::from_env()?, once).await?,
-        Command::Setup { dir, erisdb, ticket } => {
-            state::enroll(&dir, &erisdb, &ticket, |line| println!("{line}"))
-                .await
-                .context("enrolling ErisAuth with ErisDB")?;
-            let mut db = Session::open(&dir)?;
-            state::register(&mut db).await?;
-            let passphrase = new_passphrase()?;
-            state::set_passphrase(&mut db, &passphrase).await?;
-            println!("ErisAuth is set up in ErisDB, with its state in {}.", dir.display());
-        }
-        Command::Passphrase { dir } => {
-            let mut db = Session::open(&dir)?;
-            let passphrase = new_passphrase()?;
-            state::set_passphrase(&mut db, &passphrase).await?;
-            println!("The passphrase is changed.");
-        }
-        Command::Unlock { dir, installation } => {
-            let mut db = Session::open(&dir)?;
-            if state::load(&mut db).await?.is_none() {
-                bail!("ErisAuth has no passphrase yet; run `erisauth setup`");
-            }
-            state::unlock(&mut db, installation).await?;
-            match installation {
-                Some(id) => println!("{id} may guess again."),
-                None => println!("Every device may guess again."),
-            }
-        }
+        Command::Passphrase { reset } => device::prompt::passphrase(&device::Paths::from_env()?, reset).await?,
+        Command::Unlock { installation } => device::prompt::unlock(&device::Paths::from_env()?, installation).await?,
     }
     Ok(())
 }

@@ -104,19 +104,32 @@ library for both, runs the Kotlin unit tests, and assembles the debug APK.
 
 ## In ErisDB
 
-ErisAuth is also a plugin in [ErisDB](https://github.com/Eriskii/ErisDB). There it is an ErisDB
-installation holding `*`, and it approves a pending pairing for a registered ErisAuth device that
-brings the passphrase. A device approves what fits inside its own grants by itself; for anything more
-it asks ErisAuth in ErisDB, and the person types the passphrase. A stolen device without the passphrase gets only
-its own grants, and the passphrase without an enrolled device gets nothing.
+ErisAuth is also a plugin in [ErisDB](https://github.com/Eriskii/ErisDB): a manifest and an
+executable, run once per call like any ErisDB plugin. It approves a pending pairing for a registered
+ErisAuth device that brings the passphrase. A device approves what fits inside its own grants by
+itself; for anything more it asks ErisAuth in ErisDB, and the person types the passphrase. A stolen
+device without the passphrase gets only its own grants, and the passphrase without an enrolled device
+gets nothing.
+
+The plugin keeps nothing of its own. Its manifest names the grants it acts with, `*` as shipped, and
+ErisDB hands it a capability for exactly those with each call, good until the call's timeout. Narrow
+`grants` in the manifest to cap what a passphrase can ever approve; a device can approve through the
+plugin only what those grants enclose.
 
 | Operation    | Permission            | Input                                          | Answer                 |
 | ------------ | --------------------- | ---------------------------------------------- | ---------------------- |
 | `approve`    | `erisauth:approve`    | `{pairing, granted, identity, passphrase}`     | `200 {approved}`       |
 | `passphrase` | `erisauth:passphrase` | `{current, new}`, `new` at least 8 characters  | `200 {changed: true}`  |
+| `reset`      | `erisauth:reset`      | `{new}`, at least 8 characters                 | `200 {reset: true}`    |
+| `unlock`     | `erisauth:unlock`     | `{installation?}`                              | `200 {unlocked: true}` |
 
 `approve` approves `pairing` with `granted` only when the key that redeemed it is `identity`, the app
-the device vouched for. Refusals are JSON `{error, message}`:
+the device vouched for. `passphrase` changes the passphrase given the current one; `reset` sets it
+without, which is how the first one is set, and starts every device's count of wrong guesses afresh.
+`unlock` lets one device, or every device, guess again now. Every ErisAuth device holds
+`erisauth:approve` and `erisauth:passphrase`; only a device whose ceiling covers `erisauth:reset` or
+`erisauth:unlock`, such as one that approves everything, can reset or unlock. Refusals are JSON
+`{error, message}`:
 
 | Status | `error`            | Meaning                                                               |
 | ------ | ------------------ | --------------------------------------------------------------------- |
@@ -126,41 +139,32 @@ the device vouched for. Refusals are JSON `{error, message}`:
 | 404    | `no_such_pairing`  |                                                                       |
 | 409    | `not_waiting`      | The pairing is not waiting for an answer                              |
 | 409    | `not_the_app`      | A different key redeemed the pairing than the device vouched for      |
-| 503    | `not_set_up`       | `erisauth setup` has not run on the ErisDB machine                    |
+| 503    | `no_passphrase`    | Nobody has set a passphrase yet                                       |
 
-The plugin keeps the passphrase as an Argon2id hash in ErisDB's `erisauth.passphrase` facet, which
-only the plugin and the operator can read, with each device's wrong guesses. A device has three free guesses; then it
-waits a minute, then two, then four, doubling up to a day. A right guess clears its count, and one
-device's guesses never lock out another.
+The plugin keeps the passphrase as an Argon2id hash in ErisDB's `erisauth.passphrase` facet, with
+each device's wrong guesses; its writes there are signed as the user `plugin:erisauth`. A device has
+three free guesses; then it waits a minute, then two, then four, doubling up to a day. A right guess
+clears its count, and one device's guesses never lock out another.
 
 ### Install
 
-On the ErisDB machine, as the user ErisDB runs as:
+Put the executable where the manifest says and the manifest in ErisDB's plugin directory, then
+restart ErisDB:
 
 ```sh
-cargo install --locked --path . --bins
-sudo install -m 0755 ~/.cargo/bin/erisdb-plugin-erisauth /usr/local/libexec/erisdb/
+cargo build --release --locked --bin erisdb-plugin-erisauth
+sudo install -m 0755 target/release/erisdb-plugin-erisauth /usr/local/libexec/erisdb/
 sudo install -m 0644 deploy/erisauth.json /etc/erisdb/plugins.d/
-sudo install -d -o erisdb -g erisdb -m 0700 /var/lib/erisauth
 ```
 
-Restart ErisDB so it loads the manifest. Cut a ticket with `erisdb pair` and hand it to setup:
+That is all there is to it on the ErisDB machine. Set the first passphrase from a device that
+may reset it: **Passphrase** on its page, leaving the current one empty, or at its terminal:
 
-```sh
-erisauth setup --erisdb http://127.0.0.1:7700 'erisdb://pair/…'
-```
-
-Setup shows a fingerprint to compare with the `erisdb pair` terminal. Approve the request as asked:
-ErisAuth asks for `*`. Setup then registers the facet and asks for the passphrase twice.
-
-| Command                          | What it does                                     |
-| -------------------------------- | ------------------------------------------------ |
-| `erisauth passphrase`            | Set a new passphrase without the old one         |
-| `erisauth unlock [INSTALLATION]` | Let one device, or every device, guess again now |
-
-These run on the ErisDB machine. Each takes `--dir DIR`, default `/var/lib/erisauth`, which must
-match the `--dir` in the manifest. The plugin's credential there is `erisdb.json`, mode 0600: back it up as a credential, or revoke the
-installation and run setup again.
+| Command                          | What it does                                                 |
+| -------------------------------- | ------------------------------------------------------------ |
+| `erisauth passphrase`            | Change the passphrase, typing the current one                |
+| `erisauth passphrase --reset`    | Set it without the current one; the device needs `erisauth:reset` |
+| `erisauth unlock [INSTALLATION]` | Let one device, or every device, guess again now; needs `erisauth:unlock` |
 
 ## Building and testing
 
