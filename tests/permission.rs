@@ -1,4 +1,4 @@
-use erislogin::permission::{check_grant, check_grants, covers, encloses, granted, intersection, is_segment};
+use erisoverlaynetwork::permission::{check_grant, check_grants, covers, encloses, granted, intersection, is_segment};
 
 fn v(items: &[&str]) -> Vec<String> {
     items.iter().map(|s| s.to_string()).collect()

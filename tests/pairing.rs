@@ -1,140 +1,96 @@
-use erislogin::Error;
-use erislogin::identity::Identity;
-use erislogin::pairing::{Pairings, Status};
+use erisoverlaynetwork::Error;
+use erisoverlaynetwork::ceremony::{Approval, Ask};
+use erisoverlaynetwork::devices::DeviceList;
+use erisoverlaynetwork::directory::Snapshot;
+use erisoverlaynetwork::pairing::{Collected, Pairings, Status, code_session, fingerprint};
 
-fn phone() -> Identity {
-    Identity::Iroh("aa".repeat(32))
+fn phone() -> iroh::EndpointId {
+    iroh::SecretKey::generate().public()
 }
 
-fn grants(items: &[&str]) -> Vec<String> {
-    items.iter().map(|s| s.to_string()).collect()
+fn ask() -> Ask {
+    Ask::Device { name: "phone".into() }
 }
 
-#[tokio::test]
-async fn the_whole_ceremony_runs_pending_requested_approved_collected() {
-    let pairings = Pairings::new("test-pair-v1");
+fn approval() -> Approval {
+    let (list, _) = DeviceList::create(&iroh::SecretKey::generate(), "laptop").unwrap();
+    Approval::Device { snapshot: Snapshot { mesh: list.mesh(), entries: list.entries(), directory: vec![] } }
+}
+
+#[test]
+fn the_whole_ceremony_runs_pending_requested_approved_collected() {
+    let pairings = Pairings::new();
+    let me = phone();
     let (id, code) = pairings.open(600);
+    assert_eq!(code_session(&code), Some(id));
     assert_eq!(pairings.get(id).unwrap().status, Status::Pending);
-    assert!(matches!(pairings.collect(&code, &phone()).unwrap(), Status::Pending));
+    assert!(matches!(pairings.collect(&code, &me).unwrap(), Collected::Waiting));
 
-    let session = pairings.redeem(&code, "Phone", grants(&["files:read", "files:write"]), phone()).unwrap();
+    let session = pairings.redeem(&code, ask(), me).unwrap();
     assert_eq!(session.status, Status::Requested);
-    assert_eq!(session.client.as_deref(), Some("Phone"));
-    let fp = session.fingerprint.clone().unwrap();
-    assert_eq!(fp, phone().fingerprint("test-pair-v1", &id, &session.requested));
+    assert_eq!(session.ask, Some(ask()));
+    assert_eq!(session.fingerprint.as_deref(), Some(fingerprint(&id, &me, &ask()).as_str()));
+    assert!(matches!(pairings.collect(&code, &me).unwrap(), Collected::Waiting));
 
-    assert!(matches!(pairings.collect(&code, &phone()).unwrap(), Status::Requested));
-    pairings.approve(id, Some(grants(&["files:read"]))).unwrap();
-    match pairings.collect(&code, &phone()).unwrap() {
-        Status::Approved { granted } => assert_eq!(granted, grants(&["files:read"])),
-        other => panic!("expected approval, got {other:?}"),
-    }
+    let answer = approval();
+    pairings.approve(id, answer.clone()).unwrap();
+    assert!(matches!(pairings.collect(&code, &me).unwrap(), Collected::Approved(a) if a == answer));
     // Collection repeats safely after a lost response.
-    assert!(matches!(pairings.collect(&code, &phone()).unwrap(), Status::Approved { .. }));
-    assert_eq!(pairings.get(id).unwrap().status, Status::Collected { granted: grants(&["files:read"]) });
+    assert!(matches!(pairings.collect(&code, &me).unwrap(), Collected::Approved(_)));
+    assert_eq!(pairings.get(id).unwrap().status, Status::Collected);
 }
 
-#[tokio::test]
-async fn a_session_serializes_its_status_and_grants_once() {
-    let pairings = Pairings::new("test-pair-v1");
+#[test]
+fn only_the_redeemer_collects() {
+    let pairings = Pairings::new();
     let (id, code) = pairings.open(600);
-    pairings.redeem(&code, "Phone", grants(&["files:read"]), phone()).unwrap();
-    pairings.approve(id, None).unwrap();
-    let json = serde_json::to_string(&pairings.get(id).unwrap()).unwrap();
-    assert_eq!(json.matches("\"granted\"").count(), 1);
-    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(value["status"], "approved");
-    assert_eq!(value["granted"], serde_json::json!(["files:read"]));
-    assert_eq!(value["client"], "Phone");
+    pairings.redeem(&code, ask(), phone()).unwrap();
+    pairings.approve(id, approval()).unwrap();
+    assert!(matches!(pairings.collect(&code, &phone()), Err(Error::Unauthorized)));
 }
 
-#[tokio::test]
-async fn only_the_redeemer_collects() {
-    let pairings = Pairings::new("test-pair-v1");
-    let (id, code) = pairings.open(600);
-    pairings.redeem(&code, "Phone", grants(&["files:read"]), phone()).unwrap();
-    pairings.approve(id, None).unwrap();
-    let thief = Identity::Iroh("bb".repeat(32));
-    assert!(matches!(pairings.collect(&code, &thief), Err(Error::Unauthorized)));
-}
-
-#[tokio::test]
-async fn a_code_redeems_once() {
-    let pairings = Pairings::new("test-pair-v1");
+#[test]
+fn a_code_redeems_once() {
+    let pairings = Pairings::new();
     let (_, code) = pairings.open(600);
-    pairings.redeem(&code, "Phone", grants(&["files:read"]), phone()).unwrap();
-    let again = pairings.redeem(&code, "Other", grants(&["files:read"]), Identity::Iroh("bb".repeat(32)));
-    assert!(matches!(again, Err(Error::Conflict(_))));
+    pairings.redeem(&code, ask(), phone()).unwrap();
+    assert!(matches!(pairings.redeem(&code, ask(), phone()), Err(Error::Conflict(_))));
 }
 
-#[tokio::test]
-async fn a_forged_or_unknown_code_is_unauthorized() {
-    let pairings = Pairings::new("test-pair-v1");
+#[test]
+fn a_wrong_or_expired_code_is_refused() {
+    let pairings = Pairings::new();
     let (id, code) = pairings.open(600);
-    let forged = format!("{id}.AAAA");
-    assert!(matches!(pairings.redeem(&forged, "x", grants(&["a"]), phone()), Err(Error::Unauthorized)));
-    assert!(matches!(pairings.redeem("nonsense", "x", grants(&["a"]), phone()), Err(Error::Unauthorized)));
-    let other = Pairings::new("test-pair-v1");
-    assert!(matches!(other.redeem(&code, "x", grants(&["a"]), phone()), Err(Error::Unauthorized)));
+    let wrong = format!("{id}.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+    assert!(matches!(pairings.redeem(&wrong, ask(), phone()), Err(Error::Unauthorized)));
+    let (_, expired) = pairings.open(-1);
+    assert!(matches!(pairings.redeem(&expired, ask(), phone()), Err(Error::Expired | Error::Unauthorized)));
+    assert!(pairings.redeem(&code, ask(), phone()).is_ok());
 }
 
-#[tokio::test]
-async fn approval_cannot_exceed_the_request() {
-    let pairings = Pairings::new("test-pair-v1");
+#[test]
+fn a_denial_is_final_and_a_collected_session_cannot_be_denied() {
+    let pairings = Pairings::new();
+    let me = phone();
     let (id, code) = pairings.open(600);
-    assert!(matches!(pairings.approve(id, None), Err(Error::Conflict(_))));
-    pairings.redeem(&code, "Phone", grants(&["files:read"]), phone()).unwrap();
-    assert!(matches!(pairings.approve(id, Some(grants(&["files:*"]))), Err(Error::Forbidden { .. })));
-    assert!(matches!(pairings.approve(id, Some(vec![])), Err(Error::BadRequest(_))));
-}
-
-#[tokio::test]
-async fn denial_is_final_and_reported_to_the_redeemer() {
-    let pairings = Pairings::new("test-pair-v1");
-    let (id, code) = pairings.open(600);
-    pairings.redeem(&code, "Phone", grants(&["files:read"]), phone()).unwrap();
+    pairings.redeem(&code, ask(), me).unwrap();
     pairings.deny(id).unwrap();
-    assert!(matches!(pairings.collect(&code, &phone()).unwrap(), Status::Denied));
-    assert!(pairings.approve(id, None).is_err());
-}
+    assert!(matches!(pairings.collect(&code, &me).unwrap(), Collected::Denied));
+    assert!(pairings.approve(id, approval()).is_err());
 
-#[tokio::test]
-async fn an_expired_code_does_nothing() {
-    let pairings = Pairings::new("test-pair-v1");
-    let (id, code) = pairings.open(0);
-    assert!(matches!(pairings.redeem(&code, "x", grants(&["a"]), phone()), Err(Error::Expired)));
-    assert!(pairings.get(id).is_none());
-}
-
-#[tokio::test]
-async fn requested_sessions_are_listed_and_announced() {
-    let pairings = Pairings::new("test-pair-v1");
-    let mut changes = pairings.subscribe();
     let (id, code) = pairings.open(600);
-    pairings.redeem(&code, "Phone", grants(&["files:read"]), phone()).unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(1), changes.changed()).await.unwrap().unwrap();
-    let requested: Vec<_> = pairings.list().into_iter().filter(|s| s.status == Status::Requested).collect();
-    assert_eq!(requested.len(), 1);
-    assert_eq!(requested[0].id, id);
+    pairings.redeem(&code, ask(), me).unwrap();
+    pairings.approve(id, approval()).unwrap();
+    pairings.collect(&code, &me).unwrap();
+    assert!(pairings.deny(id).is_err());
 }
 
-#[tokio::test]
-async fn a_requested_request_needs_valid_grants_and_a_name() {
-    let pairings = Pairings::new("test-pair-v1");
+#[test]
+fn what_is_asked_is_checked() {
+    let pairings = Pairings::new();
     let (_, code) = pairings.open(600);
-    assert!(pairings.redeem(&code, "", grants(&["files:read"]), phone()).is_err());
-    assert!(pairings.redeem(&code, "Phone", grants(&["BAD"]), phone()).is_err());
-    assert!(pairings.redeem(&code, "Phone\n", grants(&["files:read"]), phone()).is_err());
-}
-
-#[tokio::test]
-async fn a_redeemer_computes_the_fingerprint_itself_from_the_code() {
-    let pairings = Pairings::new("test-pair-v1");
-    let (id, code) = pairings.open(600);
-    assert_eq!(erislogin::pairing::code_session(&code), Some(id));
-    assert_eq!(erislogin::pairing::code_session("nonsense"), None);
-    let requested = grants(&["files:read"]);
-    let session = pairings.redeem(&code, "Phone", requested.clone(), phone()).unwrap();
-    let mine = phone().fingerprint("test-pair-v1", &erislogin::pairing::code_session(&code).unwrap(), &requested);
-    assert_eq!(session.fingerprint.unwrap(), mine);
+    let bad = Ask::App { name: "Notes".into(), service: "Not A Service".into(), grants: vec![], serves: false };
+    assert!(pairings.redeem(&code, bad, phone()).is_err());
+    let bad = Ask::App { name: "Notes".into(), service: "notes".into(), grants: vec!["NOPE".into()], serves: false };
+    assert!(pairings.redeem(&code, bad, phone()).is_err());
 }

@@ -21,28 +21,25 @@ pub struct Request {
 }
 
 /// Print a ticket every way a person might want it: as a code for a camera,
-/// and as text for anyone who would rather type. `noun` labels the host's
-/// name, as in `core` or `device`.
-pub fn show(out: &mut impl Write, noun: &str, ticket: &Ticket, encoded: &str) -> std::io::Result<()> {
+/// and as text for anyone who would rather type.
+pub fn show(out: &mut impl Write, ticket: &Ticket, encoded: &str) -> std::io::Result<()> {
     match qr::to_blocks(encoded) {
         Ok(blocks) => writeln!(out, "\n{blocks}")?,
         // Too much data for any QR version is the only realistic failure,
         // and it should not cost the operator the ticket.
         Err(e) => writeln!(out, "(the ticket {e})\n")?,
     }
-    writeln!(out, "Scan this with the app, or with your phone's camera.\n")?;
+    writeln!(out, "Scan this with the new device, or with your phone's camera.\n")?;
     if let Some(name) = &ticket.name {
-        writeln!(out, "  {noun:<11} {name}")?;
+        writeln!(out, "  device      {name}")?;
     }
-    if let Some(eid) = &ticket.eid {
-        writeln!(out, "  endpoint id {eid}")?;
-    }
-    if let Some(url) = &ticket.url {
-        writeln!(out, "  url         {url}")?;
+    writeln!(out, "  endpoint id {}", ticket.eid)?;
+    if let Some(relay) = &ticket.relay {
+        writeln!(out, "  relay       {relay}")?;
     }
     writeln!(out, "  code        {}", ticket.token)?;
     writeln!(out, "\n  ticket      {encoded}")?;
-    writeln!(out, "\nThe code grants nothing on its own — you approve what the client asks for.")
+    writeln!(out, "\nThe code grants nothing on its own — you approve what asks to join.")
 }
 
 /// Lines typed on stdin, read off a blocking thread so that waiting and
@@ -71,9 +68,9 @@ pub fn prompt(out: &mut impl Write, text: &str) -> Result<()> {
 pub async fn answer_before(lines: &mut UnboundedReceiver<String>, expires: i64) -> Result<String> {
     let remaining = expires.saturating_sub(crate::now()).max(0) as u64;
     tokio::select! {
-        line = lines.recv() => line.ok_or_else(|| Error::Cancelled("pairing cancelled: input closed".into())),
-        _ = tokio::signal::ctrl_c() => Err(Error::Cancelled("pairing cancelled".into())),
-        _ = tokio::time::sleep(std::time::Duration::from_secs(remaining)) => Err(Error::Cancelled("pairing expired".into())),
+        line = lines.recv() => line.ok_or_else(|| Error::Cancelled("cancelled: input closed".into())),
+        _ = tokio::signal::ctrl_c() => Err(Error::Cancelled("cancelled".into())),
+        _ = tokio::time::sleep(std::time::Duration::from_secs(remaining)) => Err(Error::Cancelled("expired".into())),
     }
 }
 
@@ -84,7 +81,7 @@ pub async fn decide(
     out: &mut impl Write,
     request: &Request,
 ) -> Result<Option<Vec<String>>> {
-    writeln!(out, "\n\nCompare this code with the app: {}", request.fingerprint)?;
+    writeln!(out, "\n\nCompare this code with the other screen: {}", request.fingerprint)?;
     writeln!(out, "Approve only if both displays match.\n{} wants:", request.client)?;
     choose(lines, out, &request.asked, request.expires).await
 }

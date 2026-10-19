@@ -1,23 +1,19 @@
-//! Asking the device's ErisAuth to approve an app, instead of showing a
-//! person a ticket.
+//! Asking the device's ErisAuth to approve an app.
 //!
-//! ErisAuth listens on `$XDG_RUNTIME_DIR/erisauth/agent.sock`. An app
-//! connects and sends one line naming the service, itself, the grants it
-//! wants and the [identity](Identity) it will redeem with. ErisAuth answers
-//! with a ticket; the app redeems it at the service exactly as it would a
-//! scanned one, with that identity. ErisAuth puts the request to the person
-//! and answers `approved` or `denied`, and the app collects its credential
-//! from the service. Closing the connection withdraws the request.
+//! ErisAuth listens on `$XDG_RUNTIME_DIR/erisauth/agent.sock`. An app connects and sends one
+//! line: approve me, by this key, for this service, with these grants. ErisAuth puts the
+//! request to the person, with the program the kernel says is asking, and answers with the
+//! app's [note](crate::note) and a [snapshot](crate::directory::Snapshot) of the mesh, or a
+//! denial. Closing the connection withdraws the request.
 //!
 //! ```text
-//! app   → {"v":1,"op":"pair","service":"erisdb","client":"Notes","requested":["notes:read"],"identity":{…}}
-//! agent → {"ticket":"erisdb://pair/…"}
-//! agent → {"approved":["notes:read"]}     or  {"denied":"why"}
+//! app   → {"v":2,"op":"approve","service":"files","name":"ErisFiles","grants":["files:read"],"serves":true,"app":"…"}
+//! agent → {"approved":{"note":{…},"snapshot":{…}}}     or  {"denied":"why"}
+//! app   → {"v":2,"op":"snapshot"}
+//! agent → {"snapshot":{…}}
 //! ```
 //!
-//! Any line may instead be `{"error":"why"}`, after which the agent hangs
-//! up. With no agent listening, [`connect`] returns `None` and the app pairs
-//! by ticket as it always can.
+//! Any answer may instead be `{"error":"why"}`, after which the agent hangs up.
 
 use std::path::{Path, PathBuf};
 
@@ -26,54 +22,59 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
+use crate::directory::Snapshot;
 use crate::error::{Error, Result};
-use crate::identity::Identity;
+use crate::note::Note;
 
 /// The protocol version an app sends.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// The longest line either side reads.
-pub const MAX_LINE: u64 = 64 * 1024;
+pub const MAX_LINE: u64 = 4 * 1024 * 1024;
 
-/// What an app asks for.
+/// What an app asks to be approved for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ask {
-    /// The service to pair with, as its tickets name it: `erisdb`.
     pub service: String,
     /// The app's name for itself. Shown to the person, trusted for nothing.
-    pub client: String,
-    pub requested: Vec<String>,
-    /// The identity the app will redeem the ticket with.
-    pub identity: Identity,
+    pub name: String,
+    #[serde(default)]
+    pub grants: Vec<String>,
+    /// Whether it serves the service to other apps.
+    #[serde(default)]
+    pub serves: bool,
+    /// The key the app holds: the note will name it, and only its holder can use the note.
+    pub app: iroh::EndpointId,
 }
 
-/// The first line an app sends: an [`Ask`] with the version and operation.
+/// A line an app sends.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Request {
-    pub v: u32,
-    pub op: String,
-    #[serde(flatten)]
-    pub ask: Ask,
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum Request {
+    Approve {
+        v: u32,
+        #[serde(flatten)]
+        ask: Ask,
+    },
+    Snapshot {
+        v: u32,
+    },
 }
 
 /// A line the agent sends.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Reply {
-    /// Redeem this ticket with the identity you named.
-    Ticket(String),
-    /// The person approved these grants; collect the credential from the service.
-    Approved(Vec<String>),
-    /// Nothing was approved, and why.
+    Approved { note: Note, snapshot: Snapshot },
     Denied(String),
-    /// The agent could not take the request.
+    Snapshot(Snapshot),
     Error(String),
 }
 
 /// How a request ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Answer {
-    Approved(Vec<String>),
+    Approved { note: Note, snapshot: Snapshot },
     Denied(String),
 }
 
@@ -107,47 +108,60 @@ pub async fn connect_to(path: &Path) -> Result<Option<Agent>> {
     }
 }
 
-/// One request to the agent. Dropping it withdraws the request.
+/// One conversation with the agent. Dropping it withdraws an open request.
 pub struct Agent {
     read: BufReader<OwnedReadHalf>,
     write: OwnedWriteHalf,
 }
 
 impl Agent {
-    /// Send `ask`; returns the ticket to redeem.
-    pub async fn ask(&mut self, ask: &Ask) -> Result<String> {
-        let request = Request { v: VERSION, op: "pair".into(), ask: ask.clone() };
-        let mut line = serde_json::to_vec(&request).map_err(|e| Error::Internal(e.to_string()))?;
-        line.push(b'\n');
-        self.write.write_all(&line).await?;
+    /// Ask to be approved, and wait for the person's answer. The note is checked before it is
+    /// returned: it names this app's key and service and counts in the snapshot's mesh.
+    pub async fn approve(&mut self, ask: &Ask) -> Result<Answer> {
+        self.send(&Request::Approve { v: VERSION, ask: ask.clone() }).await?;
         match self.reply().await? {
-            Reply::Ticket(ticket) => Ok(ticket),
+            Reply::Approved { note, snapshot } => {
+                let list = snapshot.list()?;
+                note.check(&list)?;
+                if note.app() != ask.app || note.body.service != ask.service {
+                    return Err(Error::Unreachable("ErisAuth approved something other than what was asked".into()));
+                }
+                Ok(Answer::Approved { note, snapshot })
+            }
+            Reply::Denied(why) => Ok(Answer::Denied(why)),
             other => Err(unexpected(other)),
         }
     }
 
-    /// Wait for the person's answer.
-    pub async fn answer(&mut self) -> Result<Answer> {
+    /// The mesh as the device has it now.
+    pub async fn snapshot(&mut self) -> Result<Snapshot> {
+        self.send(&Request::Snapshot { v: VERSION }).await?;
         match self.reply().await? {
-            Reply::Approved(granted) => Ok(Answer::Approved(granted)),
-            Reply::Denied(why) => Ok(Answer::Denied(why)),
+            Reply::Snapshot(snapshot) => Ok(snapshot),
             other => Err(unexpected(other)),
         }
+    }
+
+    async fn send(&mut self, request: &Request) -> Result<()> {
+        let mut line = serde_json::to_vec(request).map_err(|e| Error::Internal(e.to_string()))?;
+        line.push(b'\n');
+        self.write.write_all(&line).await?;
+        Ok(())
     }
 
     async fn reply(&mut self) -> Result<Reply> {
         let mut line = String::new();
         (&mut self.read).take(MAX_LINE).read_line(&mut line).await?;
         if line.is_empty() {
-            return Err(Error::Internal("ErisAuth hung up without answering".into()));
+            return Err(Error::Unreachable("ErisAuth hung up without answering".into()));
         }
-        serde_json::from_str(&line).map_err(|e| Error::Internal(format!("ErisAuth sent something unreadable: {e}")))
+        serde_json::from_str(&line).map_err(|e| Error::Unreachable(format!("ErisAuth sent something unreadable: {e}")))
     }
 }
 
 fn unexpected(reply: Reply) -> Error {
     match reply {
-        Reply::Error(why) => Error::Internal(format!("ErisAuth could not take the request: {why}")),
-        other => Error::Internal(format!("ErisAuth answered out of turn: {other:?}")),
+        Reply::Error(why) => Error::Unreachable(format!("ErisAuth could not take the request: {why}")),
+        other => Error::Unreachable(format!("ErisAuth answered out of turn: {other:?}")),
     }
 }

@@ -1,4 +1,4 @@
-use erislogin::prompt::{Request, decide};
+use erisoverlaynetwork::prompt::{Request, decide};
 
 fn request() -> Request {
     Request {

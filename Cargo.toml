@@ -1,29 +1,37 @@
 [package]
-name = "erislogin"
-version = "0.4.1"
+name = "erisoverlaynetwork"
+version = "0.1.0"
 edition = "2024"
-description = "Pairing devices and apps over Iroh: scannable tickets, fingerprint ceremonies, signed tokens, permissions, keys"
+description = "The Eris mesh: one signed list of your devices, approvals for the apps on them, and the connections between them, over Iroh"
 license = "MIT"
-repository = "https://github.com/Eriskii/ErisLogin"
+repository = "https://github.com/Eriskii/ErisOverlayNetwork"
 readme = "README.md"
-keywords = ["iroh", "pairing", "qr", "capability", "auth"]
+keywords = ["iroh", "mesh", "pairing", "capability", "auth"]
 categories = ["authentication", "network-programming"]
 
 [features]
-default = ["iroh", "qr", "prompt", "agent"]
-# Iroh keys (`key`) and dialable ticket addresses (`Ticket::endpoint_addr`).
-iroh = ["dep:iroh"]
-# Tickets as QR codes (`qr`).
-qr = ["dep:qrcode", "dep:png"]
-# Asking the device's ErisAuth instead of showing a ticket (`agent`, Unix).
-agent = ["tokio/net", "tokio/io-util"]
-# The host's terminal ceremony (`prompt`).
-prompt = ["qr", "tokio/rt", "tokio/macros", "tokio/time", "tokio/signal"]
+default = ["native"]
+# What runs on a device or a serving app, as opposed to in a browser: the mesh
+# node, local-network discovery, the agent socket, QR codes and the terminal prompt.
+native = [
+    "iroh/default",
+    "dep:iroh-mdns-address-lookup",
+    "dep:qrcode",
+    "dep:png",
+    "tokio/net",
+    "tokio/rt",
+    "tokio/macros",
+    "tokio/time",
+    "tokio/signal",
+    "tokio/io-util",
+]
 
 [dependencies]
 base64 = "0.22"
 hmac = "0.12"
-iroh = { version = "1", optional = true }
+iroh = { version = "1", default-features = false }
+iroh-mdns-address-lookup = { version = "0.6", optional = true }
+n0-future = "0.3"
 png = { version = "0.18.1", optional = true }
 qrcode = { version = "0.14.1", default-features = false, features = ["svg"], optional = true }
 rand = "0.9"
@@ -33,25 +41,11 @@ sha2 = "0.10"
 subtle = "2"
 thiserror = "2"
 tokio = { version = "1", features = ["sync"] }
+tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
 rqrr = "0.10.1"
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
-
-[[test]]
-name = "key"
-required-features = ["iroh"]
-
-[[test]]
-name = "qr"
-required-features = ["qr"]
-
-[[test]]
-name = "prompt"
-required-features = ["prompt"]
-
-[[test]]
-name = "agent"
-required-features = ["agent"]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

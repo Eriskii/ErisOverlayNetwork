@@ -1,4 +1,4 @@
-use erislogin::qr;
+use erisoverlaynetwork::qr;
 
 fn decode(side: u32, pixels: Vec<u8>) -> String {
     let img =
@@ -47,7 +47,7 @@ fn svg_is_a_standalone_image() {
 
 #[test]
 fn the_png_path_is_in_home_and_safe() {
-    let path = qr::png_path("erisfiles", Some("my laptop/../x"));
+    let path = qr::png_path(Some("my laptop/../x"));
     let name = path.file_name().unwrap().to_str().unwrap();
-    assert_eq!(name, "erisfiles-pair-my-laptop----x.png");
+    assert_eq!(name, "eris-pair-my-laptop----x.png");
 }

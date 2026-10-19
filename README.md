@@ -1,71 +1,118 @@
-# ErisLogin
+# ErisOverlayNetwork
 
-Pairing for Eris apps and devices over [Iroh](https://iroh.computer): a host shows a QR code, a
-newcomer scans it and asks for permissions, both screens show the same fingerprint, and a person
-approves all, some, or none of the request. Crate `erislogin`.
+The Eris mesh: one signed list of your devices, approvals for the apps on them, and the connections
+between them, over [Iroh](https://iroh.computer). Crate `erisoverlaynetwork`.
 
 ```toml
-erislogin = { git = "https://github.com/Eriskii/ErisLogin", tag = "v0.4.1" }
+erisoverlaynetwork = { git = "https://github.com/Eriskii/ErisOverlayNetwork", tag = "v0.1.0" }
 ```
 
-Features `iroh` (`key`, `Ticket::endpoint_addr`), `qr`, `prompt` and `agent` are on by default. A client
-that only reads tickets and signs or checks tokens can take `default-features = false` and leave
-Iroh, QR rendering and the terminal out of its build.
+A person's devices form one mesh. Each device runs ErisAuth, which holds the device's key. You add a
+device once, from any device already in the mesh: a ticket, a fingerprint on both screens, one
+approval. From then on every device and every app on it knows every other, wherever they are.
 
-| Module       | What it holds                                                                                 |
-| ------------ | --------------------------------------------------------------------------------------------- |
-| `agent`      | Asking the device's ErisAuth for approval over its socket, instead of showing a ticket         |
-| `ticket`     | `<app>://pair/<base64url(JSON)>`: an Iroh endpoint id and/or URL, direct addresses, a code     |
-| `qr`         | A ticket as terminal blocks, SVG, a greyscale raster, or a PNG                                |
-| `pairing`    | In-memory sessions: `pending → requested → approved → collected`, or `denied`                  |
-| `prompt`     | The host's terminal ceremony: show the ticket, then `[a] approve [s] select [d] deny`          |
-| `identity`   | Who is asking: an Iroh key proven by QUIC, or a browser's S256 commitment; request fingerprints |
-| `permission` | `files:read`, `meta:*`, `*`: covering, enclosure, intersection, validation                     |
-| `token`      | `<prefix>.<b64url(json)>.<b64url(hmac)>` signed payloads                                      |
-| `key`        | An Iroh secret key derived from a secret and a tag, or kept in an owner-only file             |
+## The device list
+
+Membership is a list of signed entries that every participant keeps and checks for itself. Nothing
+is the authority over it: any member device writes entries, and an entry counts only when a device
+the list already held signed it.
+
+| Entry    | Says                                                                           |
+| -------- | ------------------------------------------------------------------------------ |
+| genesis  | The mesh begins, with its author as the first device. Its id is the mesh's id. |
+| add      | A device joins, under a name.                                                  |
+| remove   | Devices leave, for good. A removed key never counts again.                     |
+| name     | A device is called something new.                                              |
+| revoke   | An app's note stops counting.                                                  |
+| pin      | One app provides a service to the whole mesh: the mesh's ErisDB.               |
+
+Each entry names the entries its author had seen, so the entries form a graph that every copy
+orders the same way, and the same entries always mean the same members:
+
+1. An entry counts only if its author was a member when it wrote it, as far as its parents show.
+2. A removal counts whenever its author was a member. Two devices that remove each other at once
+   are both removed.
+3. Once a device is removed, the other things it wrote count only if its remover had seen them. A
+   stolen phone cannot add a computer behind the back of the device that removes it.
+
+## Apps and notes
+
+Apps are not members. A device approves an app with a **note**: the app's key, the service it takes
+part in (`files`, `erisdb`), the grants it holds there, and whether it serves that service, signed
+by the device. A note counts while its device is a member and no device has revoked it. Grants are
+permission patterns, segment by segment, with `*` matching one segment or, last, all the rest:
+`files:read`, `tasks:*`, `*`.
+
+An app on a device with ErisAuth asks it over the [agent](src/agent.rs) socket,
+`$XDG_RUNTIME_DIR/erisauth/agent.sock`, and gets its note and a snapshot of the mesh back. An app
+with no ErisAuth beside it, such as one in a browser, asks a device by ticket instead, through the
+same ceremony a device joins by.
+
+## The node
+
+Every device and every app that serves something runs a `mesh::Node` and registers its protocol
+under `eris-mesh/0`. A node:
+
+- **syncs** with whoever it talks to: both sides say who they are and where, compare the list's
+  heads, and send each other what the other lacks, along with everyone they know of;
+- **pushes** what it learns to everyone it knows at once, so a removal reaches every reachable
+  participant without anyone asking;
+- **announces** itself when it starts, when it joins, when its address changes, and every five
+  minutes.
+
+A service lets a caller in with `Node::authorize(caller, service, required)`, which checks the
+caller's note against the list, and watches `Node::subscribe()` to drop whatever stops counting.
+`Node::providers(service)` finds the apps serving a service; `Node::pinned(service)` finds the one
+pinned to it.
+
+```rust
+use erisoverlaynetwork::mesh::{self, Config, FileStore, Local, Node};
+use erisoverlaynetwork::net::{self, Network};
+
+let endpoint = net::endpoint(key, &Network::Internet).await?;
+let node = Node::start(Config {
+    endpoint: endpoint.clone(),
+    network: Network::Internet,
+    local: Local::App(note),
+    store: std::sync::Arc::new(FileStore::new(home.join("mesh.json"))),
+})
+.await?;
+let router = iroh::protocol::Router::builder(endpoint)
+    .accept(mesh::ALPN, node.protocol())
+    .accept(MY_ALPN, my_service)
+    .spawn();
+```
+
+`Network::Internet` finds participants anywhere through n0's relays and DNS, and on the same network
+through mDNS with no internet at all. `Network::Relay(url)` uses one relay and nothing else, as a
+browser must. `Network::Loopback` is for tests.
 
 ## The ceremony
 
-```rust
-use erislogin::{identity::Identity, pairing::{Pairings, Status}, ticket::Ticket};
+A member device opens a session and shows its ticket, `eris://pair/<base64url JSON>`: its endpoint
+id, addresses, relay, and a one-time code. The newcomer redeems the code over `eris-pair/0`, saying
+what it asks to be (`Ask::Device` or `Ask::App`), and computes the request's fingerprint itself.
+The device shows the same fingerprint; a person compares the two and approves. Only the key that
+redeemed the code can collect the answer: the list with the device added, or the app's note, each
+with a snapshot of the mesh.
 
-// Host
-let pairings = Pairings::new("myapp-pair-v1");
-let (session, code) = pairings.open(600);
-let ticket = Ticket::new(code, Some(endpoint_id_hex), None, Some("laptop".into()))?;
-println!("{}", ticket.encode("myapp")?); // myapp://pair/eyJ2Ijox…
+## Also here
 
-// Newcomer, over an Iroh connection the host accepted from `peer`:
-let identity = Identity::enrollment(Some(&format!("iroh:{peer}")), None)?;
-let request = pairings.redeem(&code, "Phone", vec!["files:read".into()], identity.clone())?;
-// Both screens show request.fingerprint, e.g. 12AB-34CD-56EF.
+`token` seals and opens HMAC-signed tokens; `permission` matches, encloses and intersects grants;
+`key` derives or stores an Iroh key; `qr` renders tickets; `prompt` puts a request to a person at a
+terminal.
 
-// Host, once the person agrees:
-pairings.approve(session, None)?;
+## Features
 
-// Newcomer, polling:
-if let Status::Approved { granted } = pairings.collect(&code, &identity)? { /* paired */ }
-```
-
-The code in a ticket grants nothing by itself: it lets one identity ask. A copied QR can race to
-redeem first, which is why the person compares fingerprints rather than trusting a device name, and
-once one identity has redeemed a code nobody else can collect its answer.
-
-Fingerprints are six bytes of the SHA-256 of `(domain, session, identity, requested)` as JSON,
-shown as `12AB-34CD-56EF`. The domain tag keeps one app's fingerprints from matching another's.
-
-## Tickets
-
-```json
-{ "v": 1, "name": "laptop", "eid": "e718…6a06", "addrs": ["192.168.1.4:4919"], "token": "…" }
-```
-
-`v` and `token` are required, with at least one of `eid` (64 hex characters) and `url`. `name` is an
-untrusted label. `addrs` lets a device on the same network dial before discovery answers. Parsers
-refuse unknown versions, damaged encodings, and missing addresses rather than guessing.
+`native` (default) holds the node, the agent socket, QR codes, the terminal prompt and mDNS. Without
+it the crate holds what a browser needs: the list, notes, tickets, the directory and the
+ceremony's client side.
 
 ## Testing
 
 ```sh
 cargo test
 ```
+
+The mesh tests run real nodes on loopback Iroh endpoints: devices joining one another by ticket,
+apps under notes, removals and revocations reaching everyone, and a stranger turned away.

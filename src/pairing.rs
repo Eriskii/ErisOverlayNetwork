@@ -1,16 +1,15 @@
-//! Pairing sessions held in memory, for hosts without a database.
+//! The device's side of the [ceremony](crate::ceremony): sessions held in memory.
 //!
 //! ```text
 //! pending ── redeem ──▶ requested ── approve ──▶ approved ── collect ──▶ collected
 //!                                 ── deny ─────▶ denied
 //! ```
 //!
-//! [`Pairings::open`] mints a session and its code, `<session>.<secret>`,
-//! which goes in a [ticket](crate::ticket). The newcomer redeems the code
-//! once, naming itself and the grants it would like; its [`Identity`] is
-//! bound to the session. A person approves some or all of the request, or
-//! denies it, and only that identity can collect the answer. Sessions end
-//! at their expiry, whatever state they are in.
+//! [`Pairings::open`] mints a session and its code, `<session>.<secret>`, which goes in a
+//! [ticket](crate::ticket). The newcomer redeems the code once, saying what it asks to be
+//! ([`Ask`]); the Iroh key it redeemed under is bound to the session. A person approves or
+//! denies, and only that key can collect the answer. Sessions end at their expiry, whatever
+//! state they are in.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -22,65 +21,77 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
+use crate::ceremony::{Approval, Ask};
 use crate::error::{Error, Result};
-use crate::identity::Identity;
-use crate::{now, permission};
+use crate::now;
 
-/// The longest a display name may be.
-pub const MAX_CLIENT_LEN: usize = 128;
+/// The tag in every ceremony fingerprint.
+pub const PAIR_DOMAIN: &str = "eris-pair-v1";
 
 /// Where a session stands.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Status {
     /// Waiting for a newcomer to redeem the code.
     Pending,
     /// Redeemed; waiting for a person to answer.
     Requested,
-    /// Approved with these grants; the redeemer collects them.
-    Approved {
-        granted: Vec<String>,
-    },
+    /// Approved; the redeemer collects the answer.
+    Approved,
     Denied,
-    /// The redeemer has collected these grants. Collecting again returns them again.
-    Collected {
-        granted: Vec<String>,
-    },
+    /// The redeemer has collected its answer. Collecting again returns it again.
+    Collected,
 }
 
-/// One pairing session as a host's UI sees it. The code is never part of it.
+/// One session as a device's UI sees it. The code is never part of it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: Uuid,
-    #[serde(flatten)]
     pub status: Status,
     /// Unix seconds when the session ends.
     pub expires: i64,
-    /// The redeemer's name for itself. Shown to the person, trusted for nothing.
-    pub client: Option<String>,
-    pub requested: Vec<String>,
-    pub identity: Option<Identity>,
+    /// What the redeemer asked to be.
+    pub ask: Option<Ask>,
+    /// The key it redeemed under.
+    pub identity: Option<iroh::EndpointId>,
     /// The comparison code both screens show once the code is redeemed.
     pub fingerprint: Option<String>,
 }
 
-struct Entry {
-    digest: [u8; 32],
-    session: Session,
+/// A redeemer's answer, as [`Pairings::collect`] gives it.
+#[derive(Debug, Clone)]
+pub enum Collected {
+    Waiting,
+    Approved(Approval),
+    Denied,
 }
 
-/// Every live pairing session of one host.
+struct Slot {
+    digest: [u8; 32],
+    session: Session,
+    approval: Option<Approval>,
+}
+
+/// Every live session of one device.
 pub struct Pairings {
-    domain: &'static str,
-    sessions: Mutex<HashMap<Uuid, Entry>>,
+    sessions: Mutex<HashMap<Uuid, Slot>>,
     changes: tokio::sync::watch::Sender<u64>,
 }
 
+impl Default for Pairings {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The fingerprint of `identity` asking for `ask` in `session`: what both screens show.
+pub fn fingerprint(session: &Uuid, identity: &iroh::EndpointId, ask: &Ask) -> String {
+    crate::fingerprint::fingerprint(&(PAIR_DOMAIN, session, identity, ask))
+}
+
 impl Pairings {
-    /// `domain` separates this app's fingerprints from every other's, e.g.
-    /// `"erisfiles-pair-v1"`.
-    pub fn new(domain: &'static str) -> Self {
-        Pairings { domain, sessions: Mutex::new(HashMap::new()), changes: tokio::sync::watch::channel(0).0 }
+    pub fn new() -> Self {
+        Pairings { sessions: Mutex::new(HashMap::new()), changes: tokio::sync::watch::channel(0).0 }
     }
 
     /// A receiver that changes whenever any session does.
@@ -92,11 +103,15 @@ impl Pairings {
         self.changes.send_modify(|n| *n = n.wrapping_add(1));
     }
 
-    fn live(&self) -> std::sync::MutexGuard<'_, HashMap<Uuid, Entry>> {
+    fn live(&self) -> std::sync::MutexGuard<'_, HashMap<Uuid, Slot>> {
         let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         let t = now();
-        sessions.retain(|_, entry| entry.session.expires > t);
+        sessions.retain(|_, slot| slot.session.expires > t);
         sessions
+    }
+
+    fn all(&self) -> std::sync::MutexGuard<'_, HashMap<Uuid, Slot>> {
+        self.sessions.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Open a session for `ttl_secs`; returns its id and the code to put in a ticket.
@@ -108,54 +123,44 @@ impl Pairings {
             id,
             status: Status::Pending,
             expires: now().saturating_add(ttl_secs),
-            client: None,
-            requested: Vec::new(),
+            ask: None,
             identity: None,
             fingerprint: None,
         };
-        self.live().insert(id, Entry { digest: Sha256::digest(secret).into(), session });
+        self.live().insert(id, Slot { digest: Sha256::digest(secret).into(), session, approval: None });
         self.changed();
         (id, code)
     }
 
-    /// Every session, expired ones included, so that a code can be told it
-    /// expired rather than that it is unknown.
-    fn all(&self) -> std::sync::MutexGuard<'_, HashMap<Uuid, Entry>> {
-        self.sessions.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// The session a genuine code names; [`Error::Expired`] once it has ended.
-    fn by_code<'a>(sessions: &'a mut HashMap<Uuid, Entry>, code: &str) -> Result<&'a mut Session> {
+    /// The slot a genuine code names; [`Error::Expired`] once it has ended.
+    fn by_code<'a>(sessions: &'a mut HashMap<Uuid, Slot>, code: &str) -> Result<&'a mut Slot> {
         let (id, secret) = code.split_once('.').ok_or(Error::Unauthorized)?;
         let id: Uuid = id.parse().map_err(|_| Error::Unauthorized)?;
         let secret = B64.decode(secret).map_err(|_| Error::Unauthorized)?;
-        let entry = sessions.get_mut(&id).ok_or(Error::Unauthorized)?;
+        let slot = sessions.get(&id).ok_or(Error::Unauthorized)?;
         let digest: [u8; 32] = Sha256::digest(&secret).into();
-        if !bool::from(digest.ct_eq(&entry.digest)) {
+        if !bool::from(digest.ct_eq(&slot.digest)) {
             return Err(Error::Unauthorized);
         }
-        if entry.session.expires <= now() {
+        if slot.session.expires <= now() {
             sessions.remove(&id);
             return Err(Error::Expired);
         }
-        Ok(&mut sessions.get_mut(&id).expect("checked above").session)
+        Ok(sessions.get_mut(&id).expect("checked above"))
     }
 
-    /// Redeem a code: `client` asks for `requested`, as `identity`.
-    pub fn redeem(&self, code: &str, client: &str, requested: Vec<String>, identity: Identity) -> Result<Session> {
-        if client.trim().is_empty() || client.len() > MAX_CLIENT_LEN || client.chars().any(char::is_control) {
-            return Err(Error::BadRequest(format!("client must be 1..={MAX_CLIENT_LEN} printable characters")));
-        }
-        permission::check_grants(&requested)?;
+    /// Redeem a code: `identity` asks for `ask`.
+    pub fn redeem(&self, code: &str, ask: Ask, identity: iroh::EndpointId) -> Result<Session> {
+        ask.check()?;
         let mut all = self.all();
-        let session = Self::by_code(&mut all, code)?;
+        let slot = Self::by_code(&mut all, code)?;
+        let session = &mut slot.session;
         if session.status != Status::Pending {
-            return Err(Error::Conflict(format!("this pairing code is already {}", status_name(&session.status))));
+            return Err(Error::Conflict(format!("this code is already {:?}", session.status).to_lowercase()));
         }
-        session.fingerprint = Some(identity.fingerprint(self.domain, &session.id, &requested));
+        session.fingerprint = Some(fingerprint(&session.id, &identity, &ask));
         session.status = Status::Requested;
-        session.client = Some(client.to_string());
-        session.requested = requested;
+        session.ask = Some(ask);
         session.identity = Some(identity);
         let out = session.clone();
         drop(all);
@@ -165,31 +170,26 @@ impl Pairings {
 
     /// A live session by id.
     pub fn get(&self, id: Uuid) -> Option<Session> {
-        self.live().get(&id).map(|e| e.session.clone())
+        self.live().get(&id).map(|s| s.session.clone())
     }
 
     /// Every live session, oldest expiry first.
     pub fn list(&self) -> Vec<Session> {
-        let mut sessions: Vec<Session> = self.live().values().map(|e| e.session.clone()).collect();
+        let mut sessions: Vec<Session> = self.live().values().map(|s| s.session.clone()).collect();
         sessions.sort_by_key(|s| s.expires);
         sessions
     }
 
-    /// Approve a requested session with `granted`, or with everything it
-    /// asked for when `None`. The grants must fit inside the request.
-    pub fn approve(&self, id: Uuid, granted: Option<Vec<String>>) -> Result<Session> {
+    /// Approve a requested session with the answer the redeemer collects.
+    pub fn approve(&self, id: Uuid, approval: Approval) -> Result<Session> {
         let mut sessions = self.live();
-        let session = &mut sessions.get_mut(&id).ok_or(Error::Expired)?.session;
-        if session.status != Status::Requested {
-            return Err(Error::Conflict("only a redeemed pairing code can be approved".into()));
+        let slot = sessions.get_mut(&id).ok_or(Error::Expired)?;
+        if slot.session.status != Status::Requested {
+            return Err(Error::Conflict("only a redeemed code can be approved".into()));
         }
-        let granted = granted.unwrap_or_else(|| session.requested.clone());
-        permission::check_grants(&granted)?;
-        if !permission::encloses(&session.requested, &granted) {
-            return Err(Error::Forbidden { permission: granted.join(",") });
-        }
-        session.status = Status::Approved { granted };
-        let out = session.clone();
+        slot.session.status = Status::Approved;
+        slot.approval = Some(approval);
+        let out = slot.session.clone();
         drop(sessions);
         self.changed();
         Ok(out)
@@ -198,39 +198,38 @@ impl Pairings {
     /// Deny a session that has not been collected.
     pub fn deny(&self, id: Uuid) -> Result<Session> {
         let mut sessions = self.live();
-        let session = &mut sessions.get_mut(&id).ok_or(Error::Expired)?.session;
-        if matches!(session.status, Status::Collected { .. }) {
-            return Err(Error::Conflict("this pairing was already collected".into()));
+        let slot = sessions.get_mut(&id).ok_or(Error::Expired)?;
+        if slot.session.status == Status::Collected {
+            return Err(Error::Conflict("this session was already collected".into()));
         }
-        session.status = Status::Denied;
-        let out = session.clone();
+        slot.session.status = Status::Denied;
+        slot.approval = None;
+        let out = slot.session.clone();
         drop(sessions);
         self.changed();
         Ok(out)
     }
 
-    /// The redeemer asks for its answer. `Pending` and `Requested` mean
-    /// wait; `Approved` carries the grants, and repeats safely; `Denied` is
-    /// final. Only the identity that redeemed the code may ask once it has.
-    pub fn collect(&self, code: &str, identity: &Identity) -> Result<Status> {
+    /// The redeemer asks for its answer. Only the key that redeemed the code may ask once it
+    /// has; an approved answer repeats safely.
+    pub fn collect(&self, code: &str, identity: &iroh::EndpointId) -> Result<Collected> {
         let mut sessions = self.all();
-        let session = Self::by_code(&mut sessions, code)?;
-        if session.status == Status::Pending {
-            return Ok(Status::Pending);
+        let slot = Self::by_code(&mut sessions, code)?;
+        if slot.session.status == Status::Pending {
+            return Ok(Collected::Waiting);
         }
-        if session.identity.as_ref() != Some(identity) {
+        if slot.session.identity.as_ref() != Some(identity) {
             return Err(Error::Unauthorized);
         }
-        let answer = match &session.status {
-            Status::Approved { granted } => {
-                let granted = granted.clone();
-                session.status = Status::Collected { granted: granted.clone() };
-                Status::Approved { granted }
+        let answer = match slot.session.status {
+            Status::Pending | Status::Requested => Collected::Waiting,
+            Status::Denied => Collected::Denied,
+            Status::Approved | Status::Collected => {
+                slot.session.status = Status::Collected;
+                Collected::Approved(slot.approval.clone().expect("an approved session holds its answer"))
             }
-            Status::Collected { granted } => Status::Approved { granted: granted.clone() },
-            other => other.clone(),
         };
-        let collected = matches!(answer, Status::Approved { .. });
+        let collected = matches!(answer, Collected::Approved(_));
         drop(sessions);
         if collected {
             self.changed();
@@ -239,19 +238,8 @@ impl Pairings {
     }
 }
 
-/// The session a code belongs to. A redeemer uses it to compute the
-/// request's fingerprint on its own screen, from its own identity, rather
-/// than showing whatever the host says.
+/// The session a code belongs to. A redeemer computes the fingerprint on its own screen, from
+/// its own key, rather than showing whatever the device says.
 pub fn code_session(code: &str) -> Option<Uuid> {
     code.split_once('.')?.0.parse().ok()
-}
-
-fn status_name(status: &Status) -> &'static str {
-    match status {
-        Status::Pending => "pending",
-        Status::Requested => "requested",
-        Status::Approved { .. } => "approved",
-        Status::Denied => "denied",
-        Status::Collected { .. } => "collected",
-    }
 }

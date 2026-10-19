@@ -77,12 +77,11 @@ pub fn write_png(data: &str, path: &Path, scale: u32) -> Result<()> {
     Ok(())
 }
 
-/// Where a saved QR lands: the user's home directory, named for the app and
-/// the host.
-pub fn png_path(app: &str, name: Option<&str>) -> PathBuf {
-    let label = name.unwrap_or(app);
+/// Where a saved QR lands: the user's home directory, named for the device.
+pub fn png_path(name: Option<&str>) -> PathBuf {
+    let label = name.unwrap_or("device");
     let safe: String =
         label.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).collect();
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-    home.join(format!("{app}-pair-{safe}.png"))
+    home.join(format!("eris-pair-{safe}.png"))
 }

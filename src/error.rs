@@ -1,4 +1,4 @@
-/// Every way an authentication step can refuse.
+/// Every way a step can refuse.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// The credential is missing, forged, or belongs to someone else.
@@ -8,14 +8,17 @@ pub enum Error {
     Forbidden { permission: String },
     #[error("bad request: {0}")]
     BadRequest(String),
-    /// The step is valid in general but not in the session's current state.
+    /// The step is valid in general but not in the current state.
     #[error("conflict: {0}")]
     Conflict(String),
-    #[error("this pairing code has expired")]
+    #[error("this code has expired")]
     Expired,
     /// The person at the prompt went away: input closed, ctrl-c, or time ran out.
     #[error("{0}")]
     Cancelled(String),
+    /// The other side could not be reached, or stopped making sense.
+    #[error("unreachable: {0}")]
+    Unreachable(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error("internal: {0}")]

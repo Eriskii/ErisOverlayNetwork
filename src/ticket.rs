@@ -1,14 +1,11 @@
-//! Pairing tickets: where the host is and what to say, as one scannable
-//! string.
+//! Tickets: where a device is and what to say to it, as one scannable string.
 //!
-//! `<app>://pair/<base64url-nopad(JSON)>`. The payload carries a one-time
-//! code and at least one address — an Iroh endpoint id, a plain HTTP URL, or
-//! both, so one ticket serves a browser on the LAN and a phone anywhere.
-//! Direct socket addresses, when present, let a device on the same network
-//! dial without waiting on discovery.
+//! `eris://pair/<base64url-nopad(JSON)>`. The payload carries a one-time code and the
+//! device's Iroh endpoint id. Direct socket addresses, when present, let a device on the same
+//! network dial without waiting on discovery; a relay URL lets a browser, which can reach
+//! nothing but relays, find it.
 //!
-//! There is no pairing service. A ticket is self-contained, and worth
-//! exactly the code inside it: a request that a person still has to approve.
+//! A ticket is worth exactly the code inside it: a request that a person still has to approve.
 
 use std::net::SocketAddr;
 
@@ -20,46 +17,42 @@ use crate::error::{Error, Result};
 
 /// The only ticket version there is. A client that meets a version it does
 /// not know refuses the ticket rather than guessing at the fields.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
-/// The literal prefix of `app`'s tickets. Everything after it is the payload.
-pub fn scheme(app: &str) -> String {
-    format!("{app}://pair/")
-}
+/// The literal prefix of every ticket. Everything after it is the payload.
+pub const SCHEME: &str = "eris://pair/";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ticket {
     pub v: u32,
-    /// A label for the human — *paired with my-laptop*. Never trusted.
+    /// The device's name, for the human: *joining laptop*. Never trusted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// Iroh endpoint id, 64 lowercase hex characters.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub eid: Option<String>,
-    /// Plain HTTP base URL, for clients that cannot speak QUIC.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
+    /// The device's Iroh endpoint id.
+    pub eid: iroh::EndpointId,
     /// Direct socket addresses of the endpoint, for dialing without discovery.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub addrs: Vec<SocketAddr>,
+    /// The relay the endpoint is reachable through.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<String>,
     pub token: String,
 }
 
 impl Ticket {
-    pub fn new(token: String, eid: Option<String>, url: Option<String>, name: Option<String>) -> Result<Self> {
-        let ticket = Ticket { v: VERSION, name, eid, url, addrs: Vec::new(), token };
+    pub fn new(token: String, eid: iroh::EndpointId, name: Option<String>) -> Result<Self> {
+        let ticket = Ticket { v: VERSION, name, eid, addrs: Vec::new(), relay: None, token };
         ticket.check()?;
         Ok(ticket)
     }
 
-    /// The same ticket, also naming direct addresses of its endpoint.
-    pub fn with_addrs(mut self, addrs: Vec<SocketAddr>) -> Self {
-        self.addrs = addrs;
+    /// The same ticket, also naming where its endpoint is.
+    pub fn at(mut self, addr: &iroh::EndpointAddr) -> Self {
+        self.addrs = addr.ip_addrs().copied().collect();
+        self.relay = addr.relay_urls().next().map(|r| r.to_string());
         self
     }
 
-    /// Everything a client is required to reject, checked in one place so
-    /// building and parsing cannot disagree about what a valid ticket is.
     fn check(&self) -> Result<()> {
         if self.v != VERSION {
             return Err(Error::BadRequest(format!(
@@ -68,32 +61,23 @@ impl Ticket {
             )));
         }
         if self.token.is_empty() {
-            return Err(Error::BadRequest("ticket carries no token".into()));
-        }
-        if self.eid.is_none() && self.url.is_none() {
-            return Err(Error::BadRequest("ticket names no address: it needs an endpoint id, a url, or both".into()));
-        }
-        if let Some(eid) = &self.eid
-            && !(eid.len() == 64 && eid.chars().all(|c| c.is_ascii_hexdigit()))
-        {
-            return Err(Error::BadRequest("endpoint id must be 64 hex characters".into()));
+            return Err(Error::BadRequest("ticket carries no code".into()));
         }
         Ok(())
     }
 
-    /// The scannable string for `app`.
-    pub fn encode(&self, app: &str) -> Result<String> {
+    /// The scannable string.
+    pub fn encode(&self) -> Result<String> {
         let json = serde_json::to_vec(self).map_err(|e| Error::Internal(e.to_string()))?;
-        Ok(format!("{}{}", scheme(app), B64.encode(json)))
+        Ok(format!("{SCHEME}{}", B64.encode(json)))
     }
 
-    /// Read one of `app`'s tickets.
-    pub fn parse(app: &str, s: &str) -> Result<Self> {
-        let prefix = scheme(app);
+    /// Read a ticket.
+    pub fn parse(s: &str) -> Result<Self> {
         let payload = s
             .trim()
-            .strip_prefix(prefix.as_str())
-            .ok_or_else(|| Error::BadRequest(format!("a pairing ticket starts with {prefix}")))?;
+            .strip_prefix(SCHEME)
+            .ok_or_else(|| Error::BadRequest(format!("a ticket starts with {SCHEME}")))?;
         let json = B64.decode(payload).map_err(|_| Error::BadRequest("ticket payload is not base64url".into()))?;
         let ticket: Ticket = serde_json::from_slice(&json)
             .map_err(|e| Error::BadRequest(format!("ticket payload is not a ticket: {e}")))?;
@@ -101,10 +85,12 @@ impl Ticket {
         Ok(ticket)
     }
 
-    /// The Iroh address to dial: the endpoint id and any direct addresses.
-    #[cfg(feature = "iroh")]
-    pub fn endpoint_addr(&self) -> Option<iroh::EndpointAddr> {
-        let id: iroh::EndpointId = self.eid.as_deref()?.parse().ok()?;
-        Some(iroh::EndpointAddr::from_parts(id, self.addrs.iter().copied().map(iroh::TransportAddr::Ip)))
+    /// The Iroh address to dial.
+    pub fn endpoint_addr(&self) -> iroh::EndpointAddr {
+        let relay = self.relay.as_deref().and_then(|r| r.parse::<iroh::RelayUrl>().ok());
+        iroh::EndpointAddr::from_parts(
+            self.eid,
+            self.addrs.iter().copied().map(iroh::TransportAddr::Ip).chain(relay.map(iroh::TransportAddr::Relay)),
+        )
     }
 }
