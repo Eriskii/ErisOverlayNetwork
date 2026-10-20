@@ -134,6 +134,22 @@ pub async fn approvals(paths: &Paths, once: bool) -> Result<()> {
     }
 }
 
+/// Approve or deny a request that asks for no grants: there is nothing to select.
+async fn approve_or_deny(lines: &mut UnboundedReceiver<String>, out: &mut impl Write, expires: i64) -> Result<bool> {
+    writeln!(out, "\n[a] approve   [d] deny")?;
+    prompt::prompt(out, "> ")?;
+    loop {
+        match prompt::answer_before(lines, expires).await?.trim().to_ascii_lowercase().as_str() {
+            "a" => return Ok(true),
+            "d" => return Ok(false),
+            _ => {
+                writeln!(out, "Enter a or d.")?;
+                prompt::prompt(out, "> ")?;
+            }
+        }
+    }
+}
+
 /// A passphrase typed at the terminal without echo, or one line of piped input.
 fn secret(label: &str) -> Result<String> {
     if !std::io::stdin().is_terminal() {
@@ -195,8 +211,14 @@ async fn answer(
     if prompt["passphrase"] == true {
         writeln!(out, "  Approving takes the ErisDB passphrase.")?;
     }
-    writeln!(out, "  It wants:")?;
-    let Some(grants) = prompt::choose(lines, out, &strings(&prompt["grants"]), expires).await? else {
+    let asked = strings(&prompt["grants"]);
+    let chosen = if asked.is_empty() {
+        approve_or_deny(lines, out, expires).await?.then(Vec::new)
+    } else {
+        writeln!(out, "  It wants:")?;
+        prompt::choose(lines, out, &asked, expires).await?
+    };
+    let Some(grants) = chosen else {
         return decided(out, say(paths, json!({"op": "deny", "id": id})).await, false);
     };
     if prompt["passphrase"] != true {
