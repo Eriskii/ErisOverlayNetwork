@@ -1,15 +1,10 @@
-//! erisauth: sign apps in to Eris services from a device you already trust.
+//! erisauth: the core of each device in an Eris mesh.
 //!
-//! On a [device](device), ErisAuth is an ErisDB installation of its own that
-//! apps ask instead of showing the person a ticket. It checks that the app
-//! redeeming each ticket is the app that asked, puts the request to the
-//! person, and approves it: by itself within its ceiling, or through ErisAuth's
-//! [plugin] in ErisDB.
-//!
-//! The [plugin] approves a pending pairing for a registered ErisAuth device
-//! that brings the passphrase, so a device with little authority of its own
-//! can still approve what an app needs once the person proves they are
-//! there. It acts with the grants its manifest names, which each call brings.
+//! A person's devices form one mesh, and ErisAuth is what each of them runs: it holds the
+//! device's key and runs the device's [node](erisoverlaynetwork::mesh::Node), which keeps the
+//! signed list of the person's devices. From any device in the mesh the person adds the next
+//! one (a ticket, a fingerprint on both screens, one approval), renames or removes devices, and
+//! approves the apps that ask: a mesh service with one tap, ErisDB with a tap and the ErisDB
+//! passphrase, which ErisDB itself checks. See [`device`].
 
 pub mod device;
-pub mod plugin;

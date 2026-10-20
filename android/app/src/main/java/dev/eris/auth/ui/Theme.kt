@@ -28,13 +28,23 @@ fun ErisAuthTheme(content: @Composable () -> Unit) {
     MaterialTheme(colorScheme = colors, content = content)
 }
 
-/** Keep this screen out of screenshots and the recents thumbnail while it is up: a ticket or a passphrase. */
+/** How many things on screen now keep the window out of screenshots. */
+private var secrets = 0
+
+/**
+ * Keep the window out of screenshots and the recents thumbnail while this is composed: a ticket
+ * or a passphrase field. It stays kept until the last of them goes.
+ */
 @Composable
 fun SecureWindow() {
     val activity = LocalContext.current.findActivity()
     DisposableEffect(activity) {
+        secrets += 1
         activity?.window?.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
-        onDispose { activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE) }
+        onDispose {
+            secrets -= 1
+            if (secrets == 0) activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        }
     }
 }
 

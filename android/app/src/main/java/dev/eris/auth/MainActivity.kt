@@ -19,9 +19,9 @@ import androidx.compose.ui.Modifier
 import dev.eris.auth.ui.ErisAuthApp
 import dev.eris.auth.ui.ErisAuthTheme
 
-/** ErisAuth's screens. A pairing ticket opened with the camera lands here and fills in the join form. */
+/** ErisAuth's screens. A ticket scanned with the camera, `eris://pair/…`, opens here and fills in the join screen. */
 class MainActivity : ComponentActivity() {
-    /** A ticket waiting for the join form. */
+    /** A ticket waiting for the join screen. */
     private var ticket by mutableStateOf<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -31,7 +31,8 @@ class MainActivity : ComponentActivity() {
         if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 0)
         }
-        Notifications.channel(this)
+        Notifications.channels(this)
+        Watcher.start(this)
         setContent {
             ErisAuthTheme {
                 Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
@@ -43,6 +44,16 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        Watcher.visible = true
+    }
+
+    override fun onPause() {
+        Watcher.visible = false
+        super.onPause()
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
@@ -50,5 +61,5 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun ticketIn(intent: Intent?): String? =
-        intent?.data?.takeIf { it.scheme == "erisdb" && it.host == "pair" }?.toString()
+        intent?.data?.takeIf { it.scheme == "eris" && it.host == "pair" }?.toString()
 }

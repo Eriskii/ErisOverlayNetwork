@@ -1,25 +1,32 @@
-import { takeToken } from './model';
-import type { Added, Outcome, State } from './types';
+import { takeFromFragment } from './model';
+import type { Outcome, State } from './types';
 
 const KEY = 'erisauth.token';
 
 /** The token for this daemon: handed over in the fragment, then kept for this tab. */
 export function token(): string | null {
-  const { token, hash } = takeToken(location.hash);
-  if (token) {
+  const { value, hash } = takeFromFragment(location.hash, 'token');
+  if (value) {
     history.replaceState(history.state, '', `${location.pathname}${location.search}${hash}`);
     try {
-      sessionStorage.setItem(KEY, token);
+      sessionStorage.setItem(KEY, value);
     } catch {
       // Kept in memory by the caller instead.
     }
-    return token;
+    return value;
   }
   try {
     return sessionStorage.getItem(KEY);
   } catch {
     return null;
   }
+}
+
+/** A ticket handed over in the fragment as `join=`, taken out of the address bar. */
+export function ticketFromFragment(): string | null {
+  const { value, hash } = takeFromFragment(location.hash, 'join');
+  if (value) history.replaceState(history.state, '', `${location.pathname}${location.search}${hash}`);
+  return value;
 }
 
 export class Unauthorized extends Error {}
@@ -42,34 +49,6 @@ async function call<T>(verb: 'GET' | 'POST', path: string, bearer: string, body?
 
 export const state = (bearer: string) => call<State>('GET', './api/state', bearer);
 
-export const approve = (bearer: string, id: string, granted: string[], passphrase?: string) =>
-  call<Outcome>('POST', `./api/approvals/${encodeURIComponent(id)}/approve`, bearer, {
-    granted,
-    ...(passphrase ? { passphrase } : {}),
-  });
-
-export const deny = (bearer: string, id: string) =>
-  call<Outcome>('POST', `./api/approvals/${encodeURIComponent(id)}/deny`, bearer);
-
-export const add = (bearer: string) => call<Added>('POST', './api/devices', bearer);
-
-export const join = (bearer: string, ticket: string, name: string, ceiling: string[]) =>
-  call<Outcome>('POST', './api/join', bearer, { ticket, name, ceiling });
-
-/** Change the passphrase with the current one; without it, reset it, which only some devices may. */
-export const passphrase = (bearer: string, current: string, next: string) =>
-  call<Outcome>('POST', './api/passphrase', bearer, current ? { current, new: next } : { new: next });
-
-/** Let every device guess the passphrase again now. */
-export const unlock = (bearer: string) => call<Outcome>('POST', './api/unlock', bearer, {});
-
-/** A ticket handed over in the fragment as `join=`, taken out of the address bar. */
-export function ticketFromFragment(): string | null {
-  const params = new URLSearchParams(location.hash.replace(/^#/, ''));
-  const ticket = params.get('join');
-  if (!ticket) return null;
-  params.delete('join');
-  const rest = params.toString();
-  history.replaceState(history.state, '', `${location.pathname}${location.search}${rest ? `#${rest}` : ''}`);
-  return ticket;
-}
+/** One command, answered as the daemon's socket answers it. */
+export const command = <T = Outcome>(bearer: string, message: { op: string; [key: string]: unknown }) =>
+  call<T>('POST', './api/command', bearer, message);

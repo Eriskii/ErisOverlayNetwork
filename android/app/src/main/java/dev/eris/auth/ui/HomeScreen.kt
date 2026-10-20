@@ -9,21 +9,15 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Devices
-import androidx.compose.material.icons.filled.Key
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -40,192 +34,144 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
-import dev.eris.auth.Approval
-import dev.eris.auth.DeviceState
+import dev.eris.auth.ErisDb
+import dev.eris.auth.Prompt
+import dev.eris.auth.State
 import dev.eris.auth.approveLabel
-import dev.eris.auth.covers
-import dev.eris.auth.needsPassphrase
-import dev.eris.auth.refusalOf
+import dev.eris.auth.refusal
 import dev.eris.auth.remaining
+import dev.eris.auth.short
 import kotlinx.coroutines.launch
-import org.json.JSONArray
-import org.json.JSONObject
 
-/** The requests waiting for the person, and the way to add a device or look after the passphrase. */
+/** What waits for the person: apps on this phone, apps asking by ticket, and new devices. */
 @Composable
-fun HomeScreen(
-    state: DeviceState,
-    approvals: List<Approval>,
-    now: Long,
-    onAnswered: (String) -> Unit,
-    onAddDevice: () -> Unit,
-    onPassphrase: () -> Unit,
-) {
-    Column(Modifier.fillMaxSize()) {
-        Header(title = state.name ?: "This device", overline = "ErisAuth")
-        LazyColumn(
-            Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            if (approvals.isEmpty()) {
-                item { NothingWaiting(state) }
-            }
-            items(approvals, key = { it.id }) { approval ->
-                ApprovalCard(approval = approval, device = state.grants, now = now, onAnswered = onAnswered)
-            }
-            item {
-                Row(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = onAddDevice, modifier = Modifier.weight(1f)) {
-                        Icon(Icons.Filled.Devices, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text("Add a device")
-                    }
-                    OutlinedButton(onClick = onPassphrase, modifier = Modifier.weight(1f)) {
-                        Icon(Icons.Filled.Key, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text("Passphrase")
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun NothingWaiting(state: DeviceState) {
-    Card(colors = CardDefaults.cardColors(MaterialTheme.colorScheme.surfaceVariant)) {
-        Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("Nothing is waiting", style = MaterialTheme.typography.titleSmall)
-            Text(
-                "When an app on this phone asks to sign in, or a new device asks to join, it shows up here.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Text(
-                "Approves by itself: " +
-                    state.approvesItself.joinToString(", ").ifEmpty { "nothing; everything takes the passphrase" },
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-    }
-}
-
-/** One request: who asks, what for, and the person's answer. */
-@Composable
-fun ApprovalCard(approval: Approval, device: List<String>, now: Long, onAnswered: (String) -> Unit) {
-    val scope = rememberCoroutineScope()
-    var chosen by remember(approval.id) { mutableStateOf(approval.optional.toSet()) }
-    var passphrase by remember(approval.id) { mutableStateOf("") }
-    var busy by remember(approval.id) { mutableStateOf(false) }
-    var error by remember(approval.id) { mutableStateOf("") }
-    val granted = approval.granted(chosen)
-    val needs = needsPassphrase(device, granted)
-    val service = if (approval.service == "erisdb") "ErisDB" else approval.service
-
-    fun answer(approve: Boolean) {
-        busy = true
-        error = ""
-        scope.launch {
-            val message = if (approve) {
-                JSONObject().put("op", "decide").put("id", approval.id).put("granted", JSONArray(granted))
-                    .apply { if (needs) put("passphrase", passphrase) }
-            } else {
-                JSONObject().put("op", "deny").put("id", approval.id)
-            }
-            val outcome = command(message)
-            busy = false
-            if (outcome.optBoolean("ok")) {
-                onAnswered(approval.id)
-            } else {
-                error = refusalOf(outcome)
-                if (outcome.optString("error") == "wrong_passphrase") passphrase = ""
-            }
-        }
-    }
-
-    Card(
-        colors = CardDefaults.cardColors(MaterialTheme.colorScheme.surfaceVariant),
-        modifier = Modifier.fillMaxWidth(),
+fun RequestsScreen(state: State, now: Long) {
+    LazyColumn(
+        Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Row(verticalAlignment = Alignment.Top) {
-                Column(Modifier.weight(1f)) {
-                    Text(approval.client, style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        if (approval.isDevice) "asks to join $service" else "asks to use $service",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Text(remaining(approval.expires, now), style = MaterialTheme.typography.labelMedium)
-            }
-
-            if (approval.isDevice) {
-                Surface(color = MaterialTheme.colorScheme.secondaryContainer, shape = MaterialTheme.shapes.medium) {
-                    Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text("Compare with the new device", style = MaterialTheme.typography.labelMedium)
+        if (state.approvals.isEmpty()) {
+            item {
+                Card(colors = CardDefaults.cardColors(MaterialTheme.colorScheme.surfaceVariant)) {
+                    Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("Nothing is waiting", style = MaterialTheme.typography.titleSmall)
                         Text(
-                            approval.fingerprint ?: "?",
-                            style = MaterialTheme.typography.headlineSmall,
-                            fontFamily = FontFamily.Monospace,
-                        )
-                        Text("Approve only if both screens show this code.", style = MaterialTheme.typography.bodySmall)
-                    }
-                }
-            } else {
-                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    if (approval.packageName != null) {
-                        Detail("App", approval.packageName)
-                        Detail("Signed", approval.certificate?.let { short(it, 8, 8) } ?: "unknown")
-                    } else {
-                        Detail("Program", (approval.executable ?: "unknown") + (approval.pid?.let { "  (pid $it)" } ?: ""))
-                    }
-                    Detail("Key", listOfNotNull(approval.identityKind, approval.identityKey?.let { short(it, 8, 6) }).joinToString(" ").ifEmpty { "unknown" })
-                }
-            }
-
-            Text("It wants", style = MaterialTheme.typography.labelLarge)
-            if (approval.essential.isNotEmpty()) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(checked = true, onCheckedChange = null, enabled = false)
-                    Column(Modifier.padding(start = 8.dp)) {
-                        Text("Act as an ErisAuth device", style = MaterialTheme.typography.bodyMedium)
-                        Text(
-                            "approve pairings, use the passphrase",
+                            "When an app on this phone asks to be approved, or a new device or an app asks with a " +
+                                "ticket this phone shows, it shows up here.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                 }
             }
-            approval.optional.forEach { grant ->
-                Row(
-                    Modifier.fillMaxWidth().clickable(enabled = !busy) {
-                        chosen = if (grant in chosen) chosen - grant else chosen + grant
-                        error = ""
-                    },
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Checkbox(checked = grant in chosen, onCheckedChange = null, enabled = !busy)
-                    Text(
-                        grant,
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontFamily = FontFamily.Monospace,
-                        modifier = Modifier.weight(1f).padding(start = 8.dp),
-                    )
-                    if (device.none { covers(it, grant) }) {
-                        Text("passphrase", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.tertiary)
+        }
+        items(state.approvals, key = { it.id }) { prompt ->
+            PromptCard(prompt = prompt, erisdb = state.mesh?.erisdb, now = now)
+        }
+    }
+}
+
+/** One request: who asks, for what, and the person's answer. */
+@Composable
+fun PromptCard(prompt: Prompt, erisdb: ErisDb?, now: Long) {
+    val scope = rememberCoroutineScope()
+    var chosen by remember(prompt.id) { mutableStateOf(prompt.grants.toSet()) }
+    var passphrase by remember(prompt.id) { mutableStateOf("") }
+    var sending by remember(prompt.id) { mutableStateOf(false) }
+    var error by remember(prompt.id) { mutableStateOf<String?>(null) }
+    val busy = sending || prompt.busy
+
+    fun answer(approve: Boolean) {
+        sending = true
+        error = null
+        scope.launch {
+            val outcome = command(if (approve) prompt.decide(chosen, passphrase) else op("deny").put("id", prompt.id))
+            sending = false
+            error = refusal(outcome)
+            if (outcome.optString("error") == "wrong_passphrase") passphrase = ""
+        }
+    }
+
+    Card(colors = CardDefaults.cardColors(MaterialTheme.colorScheme.surfaceVariant), modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(verticalAlignment = Alignment.Top) {
+                Column(Modifier.weight(1f)) {
+                    Text(prompt.name, style = MaterialTheme.typography.titleMedium)
+                    Text(prompt.asks, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Text(remaining(prompt.expires, now), style = MaterialTheme.typography.labelMedium)
+            }
+
+            if (prompt.fingerprint != null) {
+                Surface(color = MaterialTheme.colorScheme.secondaryContainer, shape = MaterialTheme.shapes.medium) {
+                    Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(
+                            if (prompt.isDevice) "Compare with the new device" else "Compare with the app",
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                        Text(prompt.fingerprint, style = MaterialTheme.typography.headlineSmall, fontFamily = FontFamily.Monospace)
+                        Text("Approve only if both screens show this code.", style = MaterialTheme.typography.bodySmall)
                     }
                 }
             }
 
-            if (needs && granted.isNotEmpty()) {
+            if (!prompt.isDevice) {
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    when {
+                        prompt.packageName != null -> {
+                            Detail("App", prompt.packageName)
+                            Detail("Signed", prompt.certificate?.let { short(it, 8, 8) } ?: "unknown")
+                        }
+                        prompt.program != null -> Detail("Program", prompt.program)
+                        else -> Detail("App", prompt.who)
+                    }
+                    Detail("Key", short(prompt.key))
+                }
+            }
+
+            if (prompt.becomesErisDb) {
+                Text(
+                    "Approving makes it the ErisDB of every device in the mesh" +
+                        (erisdb?.let { ", in place of ${it.name} on ${it.device}." } ?: "."),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
+
+            if (prompt.grants.isNotEmpty()) {
+                Text("It wants", style = MaterialTheme.typography.labelLarge)
+                prompt.grants.forEach { grant ->
+                    Row(
+                        Modifier.fillMaxWidth().clickable(enabled = !busy) {
+                            chosen = if (grant in chosen) chosen - grant else chosen + grant
+                            error = null
+                        },
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Checkbox(checked = grant in chosen, onCheckedChange = null, enabled = !busy)
+                        Text(
+                            grant,
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontFamily = FontFamily.Monospace,
+                            modifier = Modifier.padding(start = 8.dp),
+                        )
+                    }
+                }
+            }
+
+            if (prompt.passphrase) {
+                SecureWindow()
+                if (erisdb == null) {
+                    Text(
+                        "This mesh has no ErisDB to check the passphrase yet.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 OutlinedTextField(
                     value = passphrase,
                     onValueChange = { passphrase = it },
-                    label = { Text("Passphrase") },
+                    label = { Text("ErisDB passphrase") },
                     singleLine = true,
                     enabled = !busy,
                     visualTransformation = PasswordVisualTransformation(),
@@ -233,17 +179,17 @@ fun ApprovalCard(approval: Approval, device: List<String>, now: Long, onAnswered
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
-            if (error.isNotEmpty()) {
-                Text(error, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-            }
+            Problem(error)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                 TextButton(onClick = { answer(false) }, enabled = !busy) { Text("Deny") }
                 Spacer(Modifier.width(8.dp))
                 Button(
                     onClick = { answer(true) },
-                    enabled = !busy && granted.isNotEmpty() && (!needs || passphrase.isNotEmpty()),
+                    enabled = !busy &&
+                        (prompt.grants.isEmpty() || chosen.isNotEmpty()) &&
+                        (!prompt.passphrase || passphrase.isNotEmpty()),
                 ) {
-                    Text(approveLabel(picked = approval.optional.count { it in chosen }, of = approval.optional.size))
+                    Text(approveLabel(picked = prompt.grants.count { it in chosen }, of = prompt.grants.size))
                 }
             }
         }
@@ -262,6 +208,3 @@ private fun Detail(label: String, value: String) {
         Text(value, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
     }
 }
-
-private fun short(text: String, head: Int, tail: Int): String =
-    if (text.length <= head + tail + 1) text else "${text.take(head)}…${text.takeLast(tail)}"

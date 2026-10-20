@@ -4,55 +4,44 @@ import android.app.Service
 import android.content.Intent
 import android.os.IBinder
 import dev.eris.auth.client.Wire
-import org.json.JSONObject
+import kotlin.concurrent.thread
 
 /**
  * Where apps ask ErisAuth, bound through `dev.eris.auth.SIGN_IN`. Android says which app is
- * calling; the daemon checks that the app redeeming each ticket is the one that asked, and the
- * person answers on the page. An app that goes away withdraws its request.
+ * calling; the request reaches the daemon as the app's line on the agent socket would, with the
+ * calling package and its signing certificate as who asks, and the person answers on ErisAuth's
+ * screens. Each request is known by the asking uid and the app's own id for it, so only the app
+ * that asked can withdraw it; an app that goes away withdraws its requests.
  */
 class AuthService : Service() {
     override fun onCreate() {
         super.onCreate()
-        Notifications.channel(this)
-        Native.ensureStarted(this)
+        Notifications.channels(this)
+        Watcher.start(this)
     }
 
     override fun onBind(intent: Intent): IBinder = binder
 
-    /** Which app opened each request, so only that app can withdraw it. */
-    private val askers = java.util.concurrent.ConcurrentHashMap<String, Int>()
-
     private val binder = object : Wire.Service() {
-        override fun onAsk(ask: String, callback: IBinder, uid: Int, pid: Int) {
+        override fun onAsk(requestId: String, requestJson: String, callback: IBinder, uid: Int, pid: Int) {
             val caller = Caller.of(this@AuthService, uid, pid)
-            Thread { follow(ask, caller, uid, callback) }.start()
+            thread(name = "erisauth-request") { follow("$uid/$requestId", requestJson, caller, callback) }
         }
 
-        override fun onWithdraw(id: String, uid: Int) {
-            if (askers[id] == uid) Thread { Native.withdraw(id) }.start()
+        override fun onWithdraw(requestId: String, uid: Int) {
+            Native.withdraw("$uid/$requestId")
         }
     }
 
-    private fun follow(ask: String, caller: Caller, uid: Int, callback: IBinder) {
-        val opened = JSONObject(Native.ask(ask, caller.json()))
-        if (opened.has("error")) {
-            runCatching { Wire.answer(callback, opened.toString()) }
-            return
-        }
-        val id = opened.getString("id")
-        askers[id] = uid
-        val gone = IBinder.DeathRecipient { Native.withdraw(id) }
-        runCatching { callback.linkToDeath(gone, 0) }
-        runCatching { Wire.ticket(callback, id, opened.getString("ticket")) }
-        Thread {
-            val asked = JSONObject(Native.asked(id, 10 * 60 * 1000L))
-            if (!asked.has("settled")) Notifications.asked(this, asked)
-        }.start()
-        val answer = Native.answer(id)
+    private fun follow(key: String, line: String, caller: Caller, callback: IBinder) {
+        val gone = IBinder.DeathRecipient { Native.withdraw(key) }
+        // A callback already dead has no one to answer.
+        if (runCatching { callback.linkToDeath(gone, 0) }.isFailure) return
+        val answer = Native.ensureStarted(this).fold(
+            onSuccess = { Native.request(key, line, caller.json()) },
+            onFailure = { org.json.JSONObject().put("error", "ErisAuth did not start: ${it.message}").toString() },
+        )
         runCatching { callback.unlinkToDeath(gone, 0) }
-        askers.remove(id)
-        Notifications.done(this, id)
         runCatching { Wire.answer(callback, answer) }
     }
 }

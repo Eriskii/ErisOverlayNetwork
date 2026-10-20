@@ -1,20 +1,16 @@
-//! The approval page: the daemon serves it on loopback, and the person
-//! answers there as at the terminal.
+//! The approval page: the daemon serves it on loopback, its files to anyone and its API only
+//! to whoever holds the token in the link it writes for `erisauth open`.
 
 mod support;
 
-use erislogin::agent::{self, Answer};
-use serde_json::json;
-use support::{App, Core, Device};
+use serde_json::{Value, json};
+use support::Device;
 
 /// The page's address and token, as the daemon writes them for `erisauth open`.
 fn page(device: &Device) -> (String, String) {
+    use std::os::unix::fs::PermissionsExt;
     let path = device.runtime.path().join("erisauth/page");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
-    }
+    assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
     let link = std::fs::read_to_string(path).unwrap();
     let (base, token) = link.trim().split_once("/#token=").unwrap();
     assert!(base.starts_with("http://127.0.0.1:"), "{link}");
@@ -23,84 +19,63 @@ fn page(device: &Device) -> (String, String) {
 
 #[tokio::test]
 async fn the_page_loads_without_the_token_and_its_api_needs_it() {
-    let core = Core::start().await;
-    let mut device = Device::new();
-    device.join(&core, "Laptop", &["notes:*"]).await;
-    device.serve().await;
-    let (base, token) = page(&device);
+    let laptop = Device::founder("laptop").await;
+    let (base, token) = page(&laptop);
     let http = reqwest::Client::new();
 
     let index = http.get(format!("{base}/")).send().await.unwrap();
     assert_eq!(index.status(), 200);
-    assert!(index.headers()["content-security-policy"].to_str().unwrap().contains("frame-ancestors 'none'"));
+    let headers = index.headers().clone();
+    assert!(headers["content-security-policy"].to_str().unwrap().contains("frame-ancestors 'none'"));
+    assert_eq!(headers["x-content-type-options"], "nosniff");
+    assert_eq!(headers["referrer-policy"], "no-referrer");
     let html = index.text().await.unwrap();
     assert!(html.contains("<title>ErisAuth</title>"), "{html}");
     assert!(html.contains("script-src 'self' 'sha256-"), "the page limits its scripts");
 
     assert_eq!(http.get(format!("{base}/api/state")).send().await.unwrap().status(), 401);
     assert_eq!(http.get(format!("{base}/api/state")).bearer_auth("wrong").send().await.unwrap().status(), 401);
-    let state: serde_json::Value =
-        http.get(format!("{base}/api/state")).bearer_auth(&token).send().await.unwrap().json().await.unwrap();
-    assert_eq!(state["device"]["name"], "Laptop");
-    assert_eq!(state["device"]["joined"], true);
-    assert!(state["device"]["grants"].as_array().unwrap().contains(&json!("notes:*")), "{state}");
-    assert_eq!(state["approvals"], json!([]));
-}
+    let command = json!({"op": "add"});
+    assert_eq!(http.post(format!("{base}/api/command")).json(&command).send().await.unwrap().status(), 401);
 
-#[tokio::test]
-async fn the_person_approves_and_denies_on_the_page() {
-    let core = Core::start().await;
-    let mut device = Device::new();
-    device.join(&core, "Laptop", &["notes:*"]).await;
-    device.serve().await;
-    let (base, token) = page(&device);
-    let http = reqwest::Client::new();
-    let app = App::new("Notes");
+    let state = http.get(format!("{base}/api/state")).bearer_auth(&token).send().await.unwrap();
+    assert_eq!(state.headers()["cache-control"], "no-store");
+    let state: Value = state.json().await.unwrap();
+    assert_eq!(state["device"]["name"], "laptop");
+    assert_eq!(state["mesh"]["member"], true);
 
-    let mut asking = agent::connect_to(&device.socket()).await.unwrap().unwrap();
-    let ticket = asking.ask(&app.ask(&["notes:read", "notes:delete"])).await.unwrap();
-    let _client = app.redeem(&ticket, &["notes:read", "notes:delete"], app.key).await;
-    let id = device.asked().await["id"].as_str().unwrap().to_string();
-
-    let state: serde_json::Value =
-        http.get(format!("{base}/api/state")).bearer_auth(&token).send().await.unwrap().json().await.unwrap();
-    assert_eq!(state["approvals"][0]["id"], id);
-    let approve = format!("{base}/api/approvals/{id}/approve");
-    assert_eq!(http.post(&approve).json(&json!({"granted": ["notes:read"]})).send().await.unwrap().status(), 401);
-    let answer: serde_json::Value = http
-        .post(&approve)
+    let added: Value = http
+        .post(format!("{base}/api/command"))
         .bearer_auth(&token)
-        .json(&json!({"granted": ["notes:read"]}))
+        .json(&command)
         .send()
         .await
         .unwrap()
         .json()
         .await
         .unwrap();
-    assert_eq!(answer, json!({"ok": true}));
-    assert_eq!(asking.answer().await.unwrap(), Answer::Approved(vec!["notes:read".into()]));
+    assert!(added["ticket"].as_str().unwrap().starts_with("eris://pair/"), "{added}");
+    assert!(added["svg"].as_str().unwrap().contains("<svg"), "{added}");
 
-    let mut asking = agent::connect_to(&device.socket()).await.unwrap().unwrap();
-    let ticket = asking.ask(&app.ask(&["notes:read"])).await.unwrap();
-    let _client = app.redeem(&ticket, &["notes:read"], app.key).await;
-    let id = device.asked().await["id"].as_str().unwrap().to_string();
-    let answer: serde_json::Value = http
-        .post(format!("{base}/api/approvals/{id}/deny"))
+    // The page answers only what the person's tools ask; an app asks on the socket.
+    let posing = json!({"op": "approve", "v": 2, "service": "files", "name": "x", "grants": [], "serves": false,
+        "app": iroh::SecretKey::generate().public().to_string()});
+    let refused: Value = http
+        .post(format!("{base}/api/command"))
         .bearer_auth(&token)
+        .json(&posing)
         .send()
         .await
         .unwrap()
         .json()
         .await
         .unwrap();
-    assert_eq!(answer, json!({"ok": true}));
-    assert!(matches!(asking.answer().await.unwrap(), Answer::Denied(_)));
+    assert_eq!(refused["error"], "bad_request", "{refused}");
 }
 
 #[tokio::test]
 async fn every_file_the_page_references_is_served() {
-    let mut device = Device::new();
-    device.serve().await;
+    let device = Device::start().await;
     let (base, _) = page(&device);
     let html = reqwest::get(format!("{base}/")).await.unwrap().text().await.unwrap();
     let files: Vec<&str> =
@@ -114,122 +89,13 @@ async fn every_file_the_page_references_is_served() {
 }
 
 #[tokio::test]
-async fn the_page_shows_a_ticket_for_a_new_device() {
-    let core = Core::start().await;
-    let mut device = Device::new();
-    device.join(&core, "Laptop", &["*"]).await;
-    device.serve().await;
-    let (base, token) = page(&device);
-    let http = reqwest::Client::new();
-    assert_eq!(http.post(format!("{base}/api/devices")).send().await.unwrap().status(), 401);
-    let added: serde_json::Value =
-        http.post(format!("{base}/api/devices")).bearer_auth(&token).send().await.unwrap().json().await.unwrap();
-    assert!(added["ticket"].as_str().unwrap().starts_with("erisdb://pair/"), "{added}");
-    assert!(added["svg"].as_str().unwrap().contains("<svg"), "{added}");
-    assert!(added["expires"].as_i64().unwrap() > 0);
-}
-
-/// A device with no terminal joins from its page: paste the ticket, compare
-/// the fingerprint, and it serves apps once the join is approved.
-#[tokio::test]
-async fn a_device_joins_from_its_page() {
-    let core = Core::start().await;
-    let mut device = Device::new();
-    device.serve().await;
-    let (base, token) = page(&device);
-    let http = reqwest::Client::new();
-    let state = |http: reqwest::Client, base: String, token: String| async move {
-        http.get(format!("{base}/api/state"))
-            .bearer_auth(token)
-            .send()
-            .await
-            .unwrap()
-            .json::<serde_json::Value>()
-            .await
-            .unwrap()
-    };
-    assert_eq!(state(http.clone(), base.clone(), token.clone()).await["device"]["joined"], false);
-
-    let ((id, code), _) = core.cut_raw().await;
-    let join = json!({"ticket": core.ticket(&code), "name": "Phone", "ceiling": ["notes:*"]});
-    assert_eq!(http.post(format!("{base}/api/join")).json(&join).send().await.unwrap().status(), 401);
-    let started: serde_json::Value = http
-        .post(format!("{base}/api/join"))
-        .bearer_auth(&token)
-        .json(&join)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(started, json!({"ok": true}));
-
-    core.await_requested(&id).await;
-    let (_, session) = core.root.get(&format!("/v1/pairings/{id}")).await;
-    let shown = tokio::time::timeout(std::time::Duration::from_secs(30), async {
-        loop {
-            let now = state(http.clone(), base.clone(), token.clone()).await;
-            if now["joining"]["fingerprint"].is_string() {
-                return now;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-    })
-    .await
-    .unwrap();
-    assert_eq!(shown["joining"]["fingerprint"], session["body"]["fingerprint"], "the page shows the code to compare");
-    assert_eq!(core.root.post(&format!("/v1/pairings/{id}/approve"), json!({})).await.0, 200);
-
-    tokio::time::timeout(std::time::Duration::from_secs(30), async {
-        while state(http.clone(), base.clone(), token.clone()).await["device"]["joined"] != true {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-    })
-    .await
-    .expect("the device never became joined");
-    let now = state(http.clone(), base.clone(), token.clone()).await;
-    assert_eq!(now["device"]["name"], "Phone");
-    assert!(now["joining"].is_null(), "{now}");
-
-    // And it works without a restart: an app signs in through it.
-    let app = App::new("Notes");
-    let mut asking = agent::connect_to(&device.socket()).await.unwrap().unwrap();
-    let ticket = asking.ask(&app.ask(&["notes:read"])).await.unwrap();
-    let _client = app.redeem(&ticket, &["notes:read"], app.key).await;
-    let approval = device.asked().await;
-    assert_eq!(
-        device.say(json!({"op": "decide", "id": approval["id"], "granted": ["notes:read"]})).await,
-        json!({"ok": true})
-    );
-    assert_eq!(asking.answer().await.unwrap(), Answer::Approved(vec!["notes:read".into()]));
-}
-
-#[tokio::test]
-async fn the_passphrase_is_set_and_devices_unlocked_on_the_page() {
-    let core = Core::start().await;
-    let mut device = Device::new();
-    device.join(&core, "Laptop", &["*"]).await;
-    device.serve().await;
-    let (base, token) = page(&device);
-    let http = reqwest::Client::new();
-    let post =
-        |path: &str, body: serde_json::Value| http.post(format!("{base}{path}")).bearer_auth(&token).json(&body).send();
-    assert_eq!(
-        http.post(format!("{base}/api/passphrase")).json(&json!({"new": "x"})).send().await.unwrap().status(),
-        401
-    );
-
-    let set: serde_json::Value =
-        post("/api/passphrase", json!({"new": support::PASSPHRASE})).await.unwrap().json().await.unwrap();
-    assert_eq!(set, json!({"ok": true}));
-    let wrong: serde_json::Value = post("/api/passphrase", json!({"current": "guess", "new": "a new passphrase"}))
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(wrong["error"], "wrong_passphrase", "{wrong}");
-    let unlocked: serde_json::Value = post("/api/unlock", json!({})).await.unwrap().json().await.unwrap();
-    assert_eq!(unlocked, json!({"ok": true}));
+async fn a_stopped_daemon_takes_its_socket_and_link_with_it() {
+    let mut device = Device::start().await;
+    let link = device.runtime.path().join("erisauth/page");
+    assert!(link.exists() && device.socket().exists());
+    device.stop().await;
+    assert!(!link.exists() && !device.socket().exists());
+    let open = device.command(&["devices"]).output().await.unwrap();
+    assert!(!open.status.success());
+    assert!(String::from_utf8_lossy(&open.stderr).contains("erisauth serve"), "it says what to run");
 }

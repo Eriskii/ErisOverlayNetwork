@@ -1,14 +1,14 @@
 //! ErisAuth inside the Android app, bound to `dev.eris.auth.Native`.
 //!
-//! One daemon per process, on one runtime. Every call answers a JSON string
-//! (see [`erisauth::device::mobile`]); `answer` and `asked` block, so the app
-//! calls them off its main thread.
+//! One daemon per process, on one runtime, reaching the other devices over the internet. Every
+//! call answers a JSON string (see [`erisauth::device::mobile`]); `command` and `request` block,
+//! so the app calls them off its main thread.
 
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
 
 use erisauth::device::mobile::Mobile;
+use erisoverlaynetwork::net::Network;
 use serde_json::json;
 
 fn runtime() -> &'static tokio::runtime::Runtime {
@@ -23,22 +23,22 @@ fn mobile() -> Option<Mobile> {
 }
 
 fn not_started() -> String {
-    json!({"error": "ErisAuth has not started"}).to_string()
+    json!({"error": "not_started", "message": "ErisAuth has not started"}).to_string()
 }
 
-/// Start the daemon with its state in `data`, unless it runs already:
-/// `{"ok": true}`, or `{"error"}`.
-pub fn start(data: PathBuf, runtime_dir: PathBuf) -> String {
+/// Start the daemon with its key and mesh in `data`, unless it runs already: `{"ok": true}`, or
+/// `{"error", "message"}`.
+pub fn start(data: PathBuf) -> String {
     let mut slot = MOBILE.lock().unwrap_or_else(|e| e.into_inner());
     if slot.is_some() {
         return json!({"ok": true}).to_string();
     }
-    match runtime().block_on(Mobile::start(data, runtime_dir)) {
+    match runtime().block_on(Mobile::start(data, Network::Internet)) {
         Ok(mobile) => {
             *slot = Some(mobile);
             json!({"ok": true}).to_string()
         }
-        Err(e) => json!({"error": format!("{e:#}")}).to_string(),
+        Err(e) => json!({"error": "not_started", "message": format!("{e:#}")}).to_string(),
     }
 }
 
@@ -50,30 +50,18 @@ pub fn command(message: &str) -> String {
     }
 }
 
-pub fn ask(ask: &str, caller: &str) -> String {
+/// An app's request line, from `caller`, under the service's `key` for it.
+pub fn request(key: &str, line: &str, caller: &str) -> String {
     match mobile() {
-        Some(mobile) => runtime().block_on(mobile.ask(ask, caller)),
-        None => not_started(),
+        Some(mobile) => runtime().block_on(mobile.request(key, line, caller)),
+        None => json!({"error": "ErisAuth has not started"}).to_string(),
     }
 }
 
-pub fn answer(id: &str) -> String {
-    match mobile() {
-        Some(mobile) => runtime().block_on(mobile.answer(id)),
-        None => not_started(),
-    }
-}
-
-pub fn asked(id: &str, within_ms: u64) -> String {
-    match mobile() {
-        Some(mobile) => runtime().block_on(mobile.asked(id, Duration::from_millis(within_ms))),
-        None => not_started(),
-    }
-}
-
-pub fn withdraw(id: &str) {
+/// Take back the request under `key`.
+pub fn withdraw(key: &str) {
     if let Some(mobile) = mobile() {
-        runtime().block_on(mobile.withdraw(id));
+        mobile.withdraw(key);
     }
 }
 
@@ -81,16 +69,17 @@ pub fn withdraw(id: &str) {
 mod jni_bindings {
     use jni::JNIEnv;
     use jni::objects::{JClass, JString};
-    use jni::sys::{jlong, jstring};
+    use jni::sys::jstring;
 
     fn text(env: &mut JNIEnv, s: &JString) -> String {
         env.get_string(s).map(Into::into).unwrap_or_default()
     }
 
-    /// A panic must not unwind into the JVM, which aborts the app; it comes
-    /// back as an error like any other.
+    /// A panic must not unwind into the JVM, which aborts the app; it comes back as an error
+    /// like any other.
     fn guarded(f: impl FnOnce() -> String + std::panic::UnwindSafe) -> String {
-        std::panic::catch_unwind(f).unwrap_or_else(|_| serde_json::json!({"error": "ErisAuth panicked"}).to_string())
+        std::panic::catch_unwind(f)
+            .unwrap_or_else(|_| serde_json::json!({"error": "internal", "message": "ErisAuth panicked"}).to_string())
     }
 
     fn reply(env: &mut JNIEnv, answer: String) -> jstring {
@@ -98,14 +87,9 @@ mod jni_bindings {
     }
 
     #[unsafe(no_mangle)]
-    pub extern "system" fn Java_dev_eris_auth_Native_start(
-        mut env: JNIEnv,
-        _class: JClass,
-        data: JString,
-        runtime: JString,
-    ) -> jstring {
-        let (data, runtime) = (text(&mut env, &data), text(&mut env, &runtime));
-        let answer = guarded(move || super::start(data.into(), runtime.into()));
+    pub extern "system" fn Java_dev_eris_auth_Native_start(mut env: JNIEnv, _class: JClass, data: JString) -> jstring {
+        let data = text(&mut env, &data);
+        let answer = guarded(move || super::start(data.into()));
         reply(&mut env, answer)
     }
 
@@ -121,39 +105,21 @@ mod jni_bindings {
     }
 
     #[unsafe(no_mangle)]
-    pub extern "system" fn Java_dev_eris_auth_Native_ask(
+    pub extern "system" fn Java_dev_eris_auth_Native_request(
         mut env: JNIEnv,
         _class: JClass,
-        ask: JString,
+        key: JString,
+        line: JString,
         caller: JString,
     ) -> jstring {
-        let (ask, caller) = (text(&mut env, &ask), text(&mut env, &caller));
-        let answer = guarded(move || super::ask(&ask, &caller));
+        let (key, line, caller) = (text(&mut env, &key), text(&mut env, &line), text(&mut env, &caller));
+        let answer = guarded(move || super::request(&key, &line, &caller));
         reply(&mut env, answer)
     }
 
     #[unsafe(no_mangle)]
-    pub extern "system" fn Java_dev_eris_auth_Native_answer(mut env: JNIEnv, _class: JClass, id: JString) -> jstring {
-        let id = text(&mut env, &id);
-        let answer = guarded(move || super::answer(&id));
-        reply(&mut env, answer)
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "system" fn Java_dev_eris_auth_Native_asked(
-        mut env: JNIEnv,
-        _class: JClass,
-        id: JString,
-        within_ms: jlong,
-    ) -> jstring {
-        let id = text(&mut env, &id);
-        let answer = guarded(move || super::asked(&id, within_ms.max(0) as u64));
-        reply(&mut env, answer)
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "system" fn Java_dev_eris_auth_Native_withdraw(mut env: JNIEnv, _class: JClass, id: JString) {
-        let id = text(&mut env, &id);
-        let _ = std::panic::catch_unwind(move || super::withdraw(&id));
+    pub extern "system" fn Java_dev_eris_auth_Native_withdraw(mut env: JNIEnv, _class: JClass, key: JString) {
+        let key = text(&mut env, &key);
+        let _ = std::panic::catch_unwind(move || super::withdraw(&key));
     }
 }

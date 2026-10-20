@@ -1,40 +1,34 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import * as api from '$lib/api';
-  import { covers, needsPassphrase, remaining } from '$lib/model';
-  import type { Approval } from '$lib/types';
+  import { headline, refusal, remaining, short } from '$lib/model';
+  import type { ErisDb, Prompt } from '$lib/types';
 
   let {
-    approval,
-    device,
+    prompt,
+    erisdb,
     bearer,
     now,
     onanswered,
   }: {
-    approval: Approval;
-    device: string[];
+    prompt: Prompt;
+    erisdb: ErisDb | null;
     bearer: string;
     now: number;
     onanswered: (id: string) => void;
   } = $props();
 
-  // Each card is one request, keyed by its id, so its grants never change under it.
-  let chosen = $state(untrack(() => new Set(approval.requested)));
-  const optional = $derived(approval.requested.filter((grant) => !approval.essential.includes(grant)));
-  const picked = $derived(optional.filter((grant) => chosen.has(grant)).length);
+  // Each card is one request, keyed by its id, so what it asks never changes under it.
+  let chosen = $state(untrack(() => new Set(prompt.grants)));
   let passphrase = $state('');
   let busy = $state(false);
   let error = $state('');
 
-  const granted = $derived(approval.requested.filter((grant) => chosen.has(grant)));
-  const needs = $derived(needsPassphrase(device, granted));
-  const beyond = (grant: string) => !device.some((held) => covers(held, grant));
-  const service = $derived(approval.service === 'erisdb' ? 'ErisDB' : approval.service);
-  const signer = $derived(
-    approval.certificate ? `${approval.certificate.slice(0, 8)}…${approval.certificate.slice(-8)}` : 'unknown',
-  );
-  const key = $derived(
-    approval.identity ? `${approval.identity.key.slice(0, 8)}…${approval.identity.key.slice(-6)}` : 'unknown',
+  const said = $derived(headline(prompt, erisdb));
+  const granted = $derived(prompt.grants.filter((grant) => chosen.has(grant)));
+  const nowhere = $derived(prompt.passphrase && !erisdb);
+  const ready = $derived(
+    !busy && !prompt.busy && !nowhere && (granted.length > 0 || prompt.grants.length === 0) && (!prompt.passphrase || passphrase.length > 0),
   );
 
   function toggle(grant: string) {
@@ -45,26 +39,24 @@
     error = '';
   }
 
-  const explain: Record<string, (retry?: number) => string> = {
-    needs_passphrase: () => 'This takes the passphrase.',
-    wrong_passphrase: () => 'That is not the passphrase.',
-    locked: (retry) => `Too many wrong passphrases from this device. Try again in ${remaining(retry ?? 0, 0)}.`,
-  };
-
   async function answer(approve: boolean) {
     busy = true;
     error = '';
     try {
       const outcome = approve
-        ? await api.approve(bearer, approval.id, granted, needs ? passphrase : undefined)
-        : await api.deny(bearer, approval.id);
+        ? await api.command(bearer, {
+            op: 'decide',
+            id: prompt.id,
+            grants: granted,
+            ...(prompt.passphrase ? { passphrase } : {}),
+          })
+        : await api.command(bearer, { op: 'deny', id: prompt.id });
       if (outcome.ok) {
-        onanswered(approval.id);
+        onanswered(prompt.id);
         return;
       }
-      const code = outcome.error ?? '';
-      error = explain[code]?.(outcome.retry_after) ?? outcome.message ?? code ?? 'ErisAuth refused.';
-      if (code === 'wrong_passphrase') passphrase = '';
+      error = refusal(outcome);
+      if (outcome.error === 'wrong_passphrase') passphrase = '';
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -74,55 +66,53 @@
 </script>
 
 <article class="card">
-  <span class="strip" class:beyond={needs}></span>
+  <span class="strip" class:enclave={prompt.passphrase || prompt.becomes_erisdb}></span>
   <div class="body">
     <header>
       <div class="who">
-        <h2>{approval.client}</h2>
-        <p>{approval.kind === 'device' ? `asks to join ${service}` : `asks to use ${service}`}</p>
+        <h2>{said.title}</h2>
+        <p>{said.detail}</p>
       </div>
-      <span class="faint" title="Time left to answer">{remaining(approval.expires, now)}</span>
+      <span class="faint" title="Time left to answer">{remaining(prompt.expires, now)}</span>
     </header>
 
-    {#if approval.kind === 'device'}
+    {#if prompt.fingerprint}
       <div class="compare">
-        <p class="kicker">Compare with the new device</p>
-        <strong>{approval.fingerprint ?? '?'}</strong>
+        <p class="kicker">Compare with the {prompt.kind === 'device' ? 'new device' : "app's screen"}</p>
+        <strong>{prompt.fingerprint}</strong>
         <p>Approve only if both screens show this code.</p>
       </div>
-    {:else}
-      <dl>
-        {#if approval.package}
-          <dt>app</dt>
-          <dd><code>{approval.package}</code></dd>
-          <dt>signed</dt>
-          <dd><code title={approval.certificate ?? ''}>{signer}</code></dd>
-        {:else}
-          <dt>program</dt>
-          <dd><code>{approval.executable ?? 'unknown'}</code>{#if approval.pid}<span class="faint pid">pid {approval.pid}</span>{/if}</dd>
-        {/if}
-        <dt>key</dt>
-        <dd><code title={approval.identity?.key}>{approval.identity?.kind} {key}</code></dd>
-      </dl>
     {/if}
 
-    <fieldset>
-      <legend class="kicker">It wants</legend>
-      {#if approval.essential.length}
-        <label class="grant fixed" title={approval.essential.join('\n')}>
-          <input type="checkbox" checked disabled />
-          <span>Act as an ErisAuth device</span>
-          <span class="faint">approve pairings, use the passphrase</span>
-        </label>
+    {#if prompt.kind === 'app'}
+      <dl>
+        {#if prompt.package}
+          <dt>app</dt>
+          <dd><code>{prompt.package}</code></dd>
+          <dt>signed</dt>
+          <dd><code title={prompt.certificate ?? ''}>{prompt.certificate ? short(prompt.certificate) : 'unknown'}</code></dd>
+        {:else if prompt.via === 'agent'}
+          <dt>program</dt>
+          <dd>
+            <code>{prompt.program ?? 'unknown'}</code>{#if prompt.pid}<span class="faint pid">pid {prompt.pid}</span>{/if}
+          </dd>
+        {/if}
+        <dt>key</dt>
+        <dd><code title={prompt.key}>{short(prompt.key)}</code></dd>
+      </dl>
+
+      {#if prompt.grants.length}
+        <fieldset>
+          <legend class="kicker">It wants</legend>
+          {#each prompt.grants as grant (grant)}
+            <label class="grant">
+              <input type="checkbox" checked={chosen.has(grant)} onchange={() => toggle(grant)} disabled={busy} />
+              <code>{grant}</code>
+            </label>
+          {/each}
+        </fieldset>
       {/if}
-      {#each optional as grant (grant)}
-        <label class="grant">
-          <input type="checkbox" checked={chosen.has(grant)} onchange={() => toggle(grant)} disabled={busy} />
-          <code>{grant}</code>
-          {#if beyond(grant)}<span class="tag">passphrase</span>{/if}
-        </label>
-      {/each}
-    </fieldset>
+    {/if}
 
     <form
       onsubmit={(event) => {
@@ -130,25 +120,33 @@
         void answer(true);
       }}
     >
-      {#if needs && granted.length}
-        <!-- Password managers file the passphrase under this name. -->
-        <input type="text" name="username" autocomplete="username" value="ErisAuth" readonly hidden />
-        <input
-          class="field"
-          type="password"
-          name="passphrase"
-          autocomplete="current-password"
-          placeholder="Passphrase"
-          aria-label="Passphrase"
-          bind:value={passphrase}
-          disabled={busy}
-        />
+      {#if prompt.passphrase}
+        {#if nowhere}
+          <p class="how">This mesh has no ErisDB to check the passphrase yet; run <code>erisdb join</code> where it runs.</p>
+        {:else}
+          <!-- Password managers file the passphrase under this name. -->
+          <input type="text" name="username" autocomplete="username" value="ErisDB" readonly hidden />
+          <input
+            class="field"
+            type="password"
+            name="passphrase"
+            autocomplete="current-password"
+            placeholder="ErisDB passphrase"
+            aria-label="ErisDB passphrase"
+            bind:value={passphrase}
+            disabled={busy}
+          />
+        {/if}
       {/if}
       <p class="error-line" role="alert">{error}</p>
       <div class="actions">
-        <button type="button" class="button" disabled={busy} onclick={() => answer(false)}>Deny</button>
-        <button type="submit" class="button primary" disabled={busy || !granted.length || (needs && !passphrase)}>
-          {picked === optional.length ? 'Approve' : `Approve ${picked} of ${optional.length}`}
+        <button type="button" class="button" disabled={busy || prompt.busy} onclick={() => answer(false)}>Deny</button>
+        <button type="submit" class="button primary" disabled={!ready}>
+          {busy || prompt.busy
+            ? 'Approving…'
+            : granted.length === prompt.grants.length
+              ? 'Approve'
+              : `Approve ${granted.length} of ${prompt.grants.length}`}
         </button>
       </div>
     </form>
@@ -169,7 +167,7 @@
     background: var(--color-accent);
   }
 
-  .strip.beyond {
+  .strip.enclave {
     background: var(--color-orange);
   }
 
@@ -189,15 +187,17 @@
 
   h2 {
     margin: 0;
-    font-size: 17px;
+    font-size: 16px;
     font-weight: 600;
     overflow-wrap: anywhere;
   }
 
-  .who p {
+  .who p,
+  .how {
     margin: 3px 0 0;
     color: var(--color-subtext);
     font-size: 12px;
+    line-height: 1.5;
   }
 
   dl {
@@ -274,29 +274,12 @@
     cursor: pointer;
   }
 
-  .grant.fixed {
-    cursor: default;
-  }
-
-  .grant.fixed .faint {
-    margin-left: auto;
-  }
-
   .grant:hover {
     background: var(--color-overlay-hover);
   }
 
   .grant input {
     accent-color: var(--color-accent);
-  }
-
-  .tag {
-    margin-left: auto;
-    border: 1px solid color-mix(in oklch, var(--color-orange) 55%, transparent);
-    border-radius: 999px;
-    padding: 1px 7px;
-    color: var(--color-orange);
-    font: 9px/1.4 var(--font-mono);
   }
 
   form {

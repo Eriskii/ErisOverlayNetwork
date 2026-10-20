@@ -10,9 +10,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -25,15 +23,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
-import dev.eris.auth.PassphraseAction
+import dev.eris.auth.newPassphraseProblem
 import dev.eris.auth.passphraseProblem
 import kotlinx.coroutines.launch
-import org.json.JSONObject
 
 /**
- * The passphrase, which approves what a device may not by itself. Typed with the current one it
- * changes; without, it is set anew, which is how the first one is set and which only a device
- * allowed to reset it may do.
+ * The ErisDB passphrase, which approving an app for ErisDB takes and which ErisDB itself checks.
+ * The person changes it here, typing the current one; the first one, and resets, are set where
+ * ErisDB runs.
  */
 @Composable
 fun PassphraseScreen(onBack: () -> Unit) {
@@ -42,84 +39,63 @@ fun PassphraseScreen(onBack: () -> Unit) {
     var next by remember { mutableStateOf("") }
     var again by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf("") }
-    var done by remember { mutableStateOf("") }
-    val short = next.isNotEmpty() && next.length < 8
-    val mismatch = again.isNotEmpty() && again != next
-
-    fun run(action: PassphraseAction, message: JSONObject, success: String) {
-        busy = true
-        error = ""
-        done = ""
-        scope.launch {
-            val outcome = command(message)
-            busy = false
-            error = passphraseProblem(outcome, action)
-            if (error.isEmpty()) {
-                done = success
-                current = ""
-                next = ""
-                again = ""
-            }
-        }
-    }
+    var error by remember { mutableStateOf<String?>(null) }
+    var done by remember { mutableStateOf(false) }
+    val typed = newPassphraseProblem(next, again)
 
     Column(Modifier.fillMaxSize()) {
         SecureWindow()
-        Header(title = "Passphrase", onBack = onBack)
+        Header(title = "ErisDB passphrase", onBack = onBack)
         Column(
             Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text(
-                "Type the current passphrase to change it. Leave it empty to set one without it: that is how " +
-                    "the first passphrase is set, and only a device allowed to reset it may.",
+                "Approving an app for ErisDB takes this passphrase, which ErisDB checks. A phone that guesses " +
+                    "wrong too often waits before it may guess again. The first passphrase is set where ErisDB runs.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Secret("Current passphrase", current, enabled = !busy) { current = it }
-            Secret("New passphrase", next, enabled = !busy, note = if (short) "At least 8 characters." else null) { next = it }
-            Secret("Again", again, enabled = !busy, note = if (mismatch) "The two differ." else null) { again = it }
-            if (error.isNotEmpty()) {
-                Text(error, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-            }
-            if (done.isNotEmpty()) {
-                Text(done, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+            Secret("New passphrase", next, enabled = !busy) { next = it }
+            Secret("Again", again, enabled = !busy) { again = it }
+            Problem(typed ?: error)
+            if (done) {
+                Text("The passphrase is changed.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                 Button(
                     onClick = {
-                        val message = JSONObject().put("op", "passphrase").put("new", next)
-                        if (current.isNotEmpty()) message.put("current", current)
-                        run(if (current.isEmpty()) PassphraseAction.RESET else PassphraseAction.CHANGE, message, "The passphrase is set.")
+                        busy = true
+                        error = null
+                        done = false
+                        scope.launch {
+                            val outcome = command(op("passphrase").put("current", current).put("new", next))
+                            busy = false
+                            error = passphraseProblem(outcome)
+                            if (error == null) {
+                                done = true
+                                current = ""
+                                next = ""
+                                again = ""
+                            }
+                        }
                     },
-                    enabled = !busy && next.isNotEmpty() && !short && next == again,
-                ) { Text("Save") }
+                    enabled = !busy && current.isNotEmpty() && next.isNotEmpty() && next == again && typed == null,
+                ) { Text("Change") }
             }
-            HorizontalDivider(Modifier.padding(vertical = 8.dp))
-            Text(
-                "A device that guesses wrong three times waits before it may guess again.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            OutlinedButton(
-                onClick = { run(PassphraseAction.UNLOCK, JSONObject().put("op", "unlock"), "Every device may guess again.") },
-                enabled = !busy,
-            ) { Text("Let every device guess again") }
         }
     }
 }
 
 @Composable
-private fun Secret(label: String, value: String, enabled: Boolean, note: String? = null, onChange: (String) -> Unit) {
+private fun Secret(label: String, value: String, enabled: Boolean, onChange: (String) -> Unit) {
     OutlinedTextField(
         value = value,
         onValueChange = onChange,
         label = { Text(label) },
         singleLine = true,
         enabled = enabled,
-        isError = note != null,
-        supportingText = note?.let { { Text(it) } },
         visualTransformation = PasswordVisualTransformation(),
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
         modifier = Modifier.fillMaxWidth(),

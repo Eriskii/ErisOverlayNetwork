@@ -1,27 +1,4 @@
-/**
- * True when `grant` covers `required`, as ErisLogin decides it: segment by segment, `*` matches
- * one segment, and as a grant's last segment it matches every remaining one.
- */
-export function covers(grant: string, required: string): boolean {
-  const grants = grant.split(':');
-  const wanted = required.split(':');
-  for (let i = 0; i < grants.length; i++) {
-    if (i >= wanted.length) return false;
-    if (grants[i] === '*' && i === grants.length - 1) return true;
-    if (grants[i] !== '*' && grants[i] !== wanted[i]) return false;
-  }
-  return wanted.length === grants.length;
-}
-
-/** True when every grant in `child` is covered by some grant in `parent`. */
-export function encloses(parent: string[], child: string[]): boolean {
-  return child.every((wanted) => parent.some((grant) => covers(grant, wanted)));
-}
-
-/** True when approving `granted` takes more than this device holds, so the passphrase. */
-export function needsPassphrase(device: string[], granted: string[]): boolean {
-  return !encloses(device, granted);
-}
+import type { ErisDb, Outcome, Prompt, Removal } from './types';
 
 /** Time left until `expires` (Unix seconds) as m:ss. */
 export function remaining(expires: number, now: number): string {
@@ -29,42 +6,77 @@ export function remaining(expires: number, now: number): string {
   return `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`;
 }
 
-/** The token handed over in a URL fragment, and the fragment without it. */
-export function takeToken(hash: string): { token: string | null; hash: string } {
+/** How long ago `at` (Unix seconds) was, as a person says it. */
+export function ago(at: number, now: number): string {
+  const secs = Math.max(0, Math.floor(now - at));
+  if (secs < 60) return 'just now';
+  const [count, unit] = secs < 3600 ? [secs / 60, 'minute'] : secs < 86_400 ? [secs / 3600, 'hour'] : [secs / 86_400, 'day'];
+  const n = Math.floor(count);
+  return `${n} ${unit}${n === 1 ? '' : 's'} ago`;
+}
+
+/** One parameter handed over in a URL fragment, and the fragment without it. */
+export function takeFromFragment(hash: string, name: string): { value: string | null; hash: string } {
   const params = new URLSearchParams(hash.replace(/^#/, ''));
-  const token = params.get('token');
-  params.delete('token');
+  const value = params.get(name);
+  params.delete(name);
   const rest = params.toString();
-  return { token, hash: rest ? `#${rest}` : '' };
+  return { value, hash: rest ? `#${rest}` : '' };
 }
 
-/** A ceiling as typed: grants separated by commas or spaces; nothing typed means everything. */
-export function parseCeiling(typed: string): string[] {
-  const grants = typed.split(/[\s,]+/).filter(Boolean);
-  return grants.length ? grants : ['*'];
+/** The start and end of a long key or digest. */
+export function short(text: string, head = 8, tail = 6): string {
+  return text.length <= head + tail + 1 ? text : `${text.slice(0, head)}…${text.slice(-tail)}`;
 }
 
-/** What the person was doing with the passphrase. */
-export type PassphraseAction = 'change' | 'reset' | 'unlock';
+/** A service as a person reads it. */
+export function serviceName(service: string | null): string {
+  return service === 'erisdb' ? 'ErisDB' : (service ?? 'a service');
+}
 
-/** What went wrong with a passphrase request, in words; empty when nothing did. */
-export function passphraseProblem(
-  outcome: { ok?: true; error?: string; message?: string; retry_after?: number },
-  action: PassphraseAction,
-): string {
-  if (outcome.ok) return '';
-  switch (outcome.error) {
-    case 'wrong_passphrase':
-      return 'That is not the current passphrase.';
-    case 'forbidden':
-      return action === 'unlock'
-        ? 'This device may not unlock devices.'
-        : 'This device may not set the passphrase without the current one.';
-    case 'locked':
-      return `Too many wrong passphrases from this device; it may try again in ${remaining(outcome.retry_after ?? 0, 0)}.`;
-    case 'no_passphrase':
-      return 'There is no passphrase yet; leave the current one empty to set the first.';
-    default:
-      return outcome.message ?? outcome.error ?? 'ErisAuth could not do that.';
+/** What a request says at the top of its card. */
+export function headline(prompt: Prompt, erisdb: ErisDb | null): { title: string; detail: string } {
+  if (prompt.kind === 'device') {
+    return { title: `${prompt.name} asks to join your devices`, detail: 'A new device, with a ticket this one showed.' };
   }
+  if (prompt.becomes_erisdb) {
+    const replaces = erisdb ? `, in place of ${erisdb.name} on ${erisdb.device}` : '';
+    return {
+      title: `${prompt.name} asks to be your ErisDB`,
+      detail: `Every device and app in the mesh will keep its data there${replaces}.`,
+    };
+  }
+  const serving = prompt.serves ? ', and to serve it to other apps' : '';
+  const via = prompt.via === 'ticket' ? 'An app with no ErisAuth beside it, by ticket.' : 'An app on this device.';
+  return { title: `${prompt.name} asks to use ${serviceName(prompt.service)}${serving}`, detail: via };
+}
+
+/** Why a command did not go through, in words. */
+export function refusal(outcome: Outcome): string {
+  switch (outcome.error) {
+    case 'needs_passphrase':
+      return 'Approving this takes the ErisDB passphrase.';
+    case 'wrong_passphrase':
+      return 'That is not the passphrase.';
+    case 'locked':
+      return `Too many wrong passphrases from this device. Try again in ${remaining(outcome.retry_after ?? 0, 0)}.`;
+    case 'not_asked':
+      return 'Approve only what was asked for.';
+    case 'no_such_request':
+      return 'This request is gone: answered elsewhere, withdrawn, or out of time.';
+    default:
+      return outcome.message ?? outcome.error ?? 'ErisAuth refused.';
+  }
+}
+
+/** The devices one removal carries: the device, and every device it added that the person did not untick. */
+export function toRemove(removal: Removal, kept: Set<string>): string[] {
+  return [removal.device.id, ...removal.also.map((d) => d.id).filter((id) => !kept.has(id))];
+}
+
+/** What is wrong with a new passphrase as typed twice; empty when nothing is. */
+export function newPassphraseProblem(next: string, again: string): string {
+  if (next.length > 0 && [...next].length < 8) return 'At least 8 characters.';
+  if (again.length > 0 && again !== next) return 'The two differ.';
+  return '';
 }

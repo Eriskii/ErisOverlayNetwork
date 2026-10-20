@@ -1,8 +1,12 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import * as api from '$lib/api';
+  import { ago, short } from '$lib/model';
   import AddDevice from '$lib/components/AddDevice.svelte';
   import ApprovalCard from '$lib/components/ApprovalCard.svelte';
+  import Apps from '$lib/components/Apps.svelte';
+  import Devices from '$lib/components/Devices.svelte';
+  import Events from '$lib/components/Events.svelte';
   import JoinForm from '$lib/components/JoinForm.svelte';
   import Passphrase from '$lib/components/Passphrase.svelte';
   import type { State } from '$lib/types';
@@ -12,41 +16,48 @@
   let problem = $state<'token' | 'unreachable' | null>(null);
   let now = $state(Date.now() / 1000);
   let answered = $state(new Set<string>());
-  /** A ticket handed to this page to join with, as a phone's link to it does. */
+  /** A ticket handed to this page to join with, as a link to it can carry. */
   let handed = $state<string | null>(null);
 
   const approvals = $derived((current?.approvals ?? []).filter((a) => !answered.has(a.id)));
+  const mesh = $derived(current?.mesh ?? null);
 
-  async function refresh() {
-    if (!bearer) {
-      problem = 'token';
-      return;
-    }
-    try {
-      current = await api.state(bearer);
-      problem = null;
-      const waiting = new Set(current.approvals.map((a) => a.id));
-      answered = new Set([...answered].filter((id) => waiting.has(id)));
-    } catch (e) {
-      problem = e instanceof api.Unauthorized ? 'token' : 'unreachable';
+  /** Read the state, then wait for it to change, for as long as the page is open. */
+  async function follow(alive: () => boolean) {
+    while (alive()) {
+      if (!bearer) {
+        problem = 'token';
+        await new Promise((done) => setTimeout(done, 1000));
+        continue;
+      }
+      try {
+        const read = await api.state(bearer);
+        current = read;
+        problem = null;
+        const waiting = new Set(read.approvals.map((a) => a.id));
+        answered = new Set([...answered].filter((id) => waiting.has(id)));
+        await api.command(bearer, { op: 'wait', after: read.version, within_ms: 25_000 });
+      } catch (e) {
+        problem = e instanceof api.Unauthorized ? 'token' : 'unreachable';
+        await new Promise((done) => setTimeout(done, 1000));
+      }
     }
   }
 
   onMount(() => {
+    let open = true;
     handed = api.ticketFromFragment();
     bearer = api.token();
-    void refresh();
+    void follow(() => open);
     const adopt = () => {
       handed = api.ticketFromFragment() ?? handed;
-      bearer = api.token();
-      void refresh();
+      bearer = api.token() ?? bearer;
     };
     addEventListener('hashchange', adopt);
-    const poll = setInterval(refresh, 1000);
     const clock = setInterval(() => (now = Date.now() / 1000), 1000);
     return () => {
+      open = false;
       removeEventListener('hashchange', adopt);
-      clearInterval(poll);
       clearInterval(clock);
     };
   });
@@ -59,12 +70,9 @@
 <main>
   <header class="top">
     <p class="kicker">ErisAuth</p>
-    {#if current?.device.joined}
-      <h1>{current.device.name}</h1>
-    {:else}
-      <h1>This device</h1>
-    {/if}
+    <h1>{current?.device.name ?? 'This device'}</h1>
     <span class="dot" class:live={current && !problem} title={problem ? 'Not connected' : 'Connected'}></span>
+    {#if mesh}<p class="faint mesh" title={mesh.id}>mesh {short(mesh.id)}</p>{/if}
   </header>
 
   {#if problem === 'token'}
@@ -77,33 +85,57 @@
       <h2>ErisAuth is not answering</h2>
       <p>Start it with <code>erisauth serve</code>; this page reconnects by itself.</p>
     </section>
-  {:else if current && !current.device.joined && bearer}
+  {:else if current && bearer && !mesh}
     {#key handed}
       <JoinForm {bearer} joining={current.joining} ticket={handed} />
     {/key}
-  {:else if current && !approvals.length}
-    <section class="note quiet">
-      <h2>Nothing is waiting</h2>
-      <p>When an app on this device asks to sign in, or a new device asks to join, it shows up here.</p>
-      <p class="faint">Approves by itself: {current.device.grants.filter((g) => !g.startsWith('meta:') && !g.startsWith('erisauth')).join(', ') || 'nothing; everything takes the passphrase'}</p>
+  {:else if current && bearer && mesh && !mesh.member}
+    <section class="note">
+      <h2>This device was removed from its mesh</h2>
+      <p>Another device removed it. A removed device never counts again; to come back, it joins anew with a new key.</p>
     </section>
-  {:else if current && bearer}
+  {:else if current && bearer && mesh}
     <section class="approvals">
-      {#each approvals as approval (approval.id)}
+      {#each approvals as prompt (prompt.id)}
         <ApprovalCard
-          {approval}
-          device={current.device.grants}
+          {prompt}
+          erisdb={mesh.erisdb}
           {bearer}
           {now}
           onanswered={(id) => (answered = new Set([...answered, id]))}
         />
+      {:else}
+        <div class="note quiet">
+          <h2>Nothing is waiting</h2>
+          <p>When an app asks for a note, or a new device asks to join, it shows up here.</p>
+        </div>
       {/each}
     </section>
-  {/if}
 
-  {#if current?.device.joined && bearer && !problem}
-    <AddDevice {bearer} {now} waiting={approvals.map((a) => a.id)} />
-    <Passphrase {bearer} />
+    <div class="adds">
+      <AddDevice {bearer} {now} purpose="device" tickets={current.tickets} />
+      <AddDevice {bearer} {now} purpose="app" tickets={current.tickets} />
+    </div>
+
+    <Devices {bearer} devices={mesh.devices} {now} />
+
+    <section class="erisdb">
+      <p class="kicker">ErisDB</p>
+      {#if mesh.erisdb}
+        <p>
+          <span class="dot inline" class:live={mesh.erisdb.reachable}></span>
+          {mesh.erisdb.name}, approved on {mesh.erisdb.device} {ago(mesh.erisdb.approved_at, now)}
+        </p>
+      {:else}
+        <p>This mesh has no ErisDB yet. Run <code>erisdb join</code> where it runs, and approve it here.</p>
+      {/if}
+    </section>
+
+    <Apps {bearer} notes={current.notes} {now} />
+    {#if mesh.erisdb}
+      <Passphrase {bearer} />
+    {/if}
+    <Events events={current.events} {now} />
   {/if}
 </main>
 
@@ -111,8 +143,8 @@
   main {
     display: flex;
     flex-direction: column;
-    gap: 18px;
-    max-width: 560px;
+    gap: 22px;
+    max-width: 600px;
     margin: 0 auto;
     padding: 28px 16px 40px;
   }
@@ -126,8 +158,13 @@
     padding-bottom: 14px;
   }
 
-  .top .kicker {
+  .top .kicker,
+  .top .mesh {
     grid-column: 1 / -1;
+  }
+
+  .top .mesh {
+    margin: 0;
   }
 
   h1 {
@@ -145,6 +182,11 @@
     background: var(--failed);
   }
 
+  .dot.inline {
+    display: inline-block;
+    margin: 0 6px 1px 0;
+  }
+
   .dot.live {
     background: var(--working);
   }
@@ -153,6 +195,24 @@
     display: flex;
     flex-direction: column;
     gap: 14px;
+  }
+
+  .adds {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 10px;
+  }
+
+  .adds > :global(section) {
+    flex-basis: 100%;
+  }
+
+  .erisdb p:not(.kicker) {
+    margin: 6px 0 0;
+    color: var(--color-subtext);
+    font-size: 12px;
+    line-height: 1.5;
   }
 
   .note {
@@ -177,10 +237,6 @@
     color: var(--color-subtext);
     font-size: 12px;
     line-height: 1.5;
-  }
-
-  .note .faint {
-    margin-top: 12px;
   }
 
   code {

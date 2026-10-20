@@ -1,37 +1,46 @@
 //! ErisAuth on a device.
 //!
-//! A device joins ErisDB once, as an installation of its own over Iroh
-//! ([`begin_join`], from the command line or the page). It asks for the right to open and approve pairings, to ask
-//! ErisAuth in ErisDB, and for a ceiling: the grants it may approve for an app by itself.
-//! [`serve`] then listens where apps look for it and puts their requests
-//! to the person.
+//! [`Daemon::start`] loads the device's key, starts its mesh node, and answers on Iroh: the
+//! mesh's own protocol, and the ceremony a newcomer redeems a ticket over. [`serve`] adds what a
+//! computer needs around it: the [agent socket](socket) apps and the person's tools reach it
+//! on, the loopback [approval page](page), and desktop [notifications](notify). On Android the
+//! daemon runs in the app's process instead ([`mobile`]).
+//!
+//! What the person can do, the [commands](command) say; what apps and newcomers ask, and how
+//! the person's answer is carried out, is in [`agent`].
 
 pub mod agent;
+pub mod changes;
 pub mod command;
+pub mod erisdb;
 pub mod mobile;
 pub mod notify;
 pub mod page;
 pub mod prompt;
 pub mod socket;
 
-use std::net::SocketAddr;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock};
 
-use anyhow::{Context, Result, bail};
-use serde::{Deserialize, Serialize};
+use anyhow::{Context, Result};
+use erisoverlaynetwork::ceremony::{self, PairService};
+use erisoverlaynetwork::mesh::{self, Config, FileStore, Local, Node};
+use erisoverlaynetwork::net::{self, Network};
+use erisoverlaynetwork::pairing::Pairings;
+use erisoverlaynetwork::{DeviceId, Note};
+use iroh::protocol::Router;
+use serde::Serialize;
+use tokio::sync::watch;
+use uuid::Uuid;
 
-/// What a device holds besides its ceiling: opening and approving pairings,
-/// and asking ErisAuth in ErisDB.
-pub const BASE: [&str; 5] =
-    ["meta:pairing:create", "meta:pairing:read", "meta:pairing:approve", "erisauth:approve", "erisauth:passphrase"];
-
-/// Where a device keeps its key and its standing with ErisDB, and where it listens.
+/// Where a device keeps its key and its mesh, and where it listens.
 #[derive(Debug, Clone)]
 pub struct Paths {
-    /// `$XDG_DATA_HOME/erisauth`.
+    /// `$XDG_DATA_HOME/erisauth`: the key, the mesh, the notes this device issued.
     pub data: PathBuf,
-    /// `$XDG_RUNTIME_DIR`, under which [`erislogin::agent::socket_in`] puts the socket.
+    /// The session's runtime directory — `$XDG_RUNTIME_DIR`, or `$TMPDIR` on macOS — under which
+    /// the socket and the page's link live.
     pub runtime: PathBuf,
 }
 
@@ -42,119 +51,272 @@ impl Paths {
             .or_else(|| var("HOME").map(|home| home.join(".local/share")))
             .context("neither XDG_DATA_HOME nor HOME is set")?
             .join("erisauth");
-        let runtime = var("XDG_RUNTIME_DIR").context("XDG_RUNTIME_DIR is not set; ErisAuth listens there")?;
+        let runtime = erisoverlaynetwork::sys::runtime_dir()
+            .context("XDG_RUNTIME_DIR is not set; ErisAuth listens in the session's runtime directory")?;
         Ok(Paths { data, runtime })
     }
 
-    pub fn key(&self) -> PathBuf {
-        self.data.join("key")
-    }
-
-    pub fn device(&self) -> PathBuf {
-        self.data.join("device.json")
-    }
-
     pub fn socket(&self) -> PathBuf {
-        erislogin::agent::socket_in(&self.runtime)
+        erisoverlaynetwork::agent::socket_in(&self.runtime)
     }
 }
 
-/// This device's standing with ErisDB.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Joined {
-    /// The device's name, as the person gave it.
-    pub name: String,
-    /// ErisDB's Iroh endpoint id.
-    pub eid: String,
-    /// ErisDB's direct addresses, as its ticket named them.
-    #[serde(default)]
-    pub addrs: Vec<SocketAddr>,
-    /// The latest access token. It names the installation, which renews it
-    /// by proving this device's key.
-    pub token: String,
+/// The device's key.
+pub fn key_path(data: &Path) -> PathBuf {
+    data.join("key")
 }
 
-impl Joined {
-    pub fn load(paths: &Paths) -> Result<Option<Self>> {
-        match std::fs::read(paths.device()) {
-            Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes).context("device.json is damaged")?)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    pub fn save(&self, paths: &Paths) -> Result<()> {
-        write_private(&paths.device(), &serde_json::to_vec_pretty(self)?)
-    }
-
-    /// The name this device's installation goes by in ErisDB.
-    pub fn installation(&self) -> String {
-        installation_name(&self.name)
-    }
-
-    pub fn addr(&self) -> Result<iroh::EndpointAddr> {
-        let id: iroh::EndpointId = self.eid.parse().context("device.json names a damaged endpoint id")?;
-        Ok(iroh::EndpointAddr::from_parts(id, self.addrs.iter().copied().map(iroh::TransportAddr::Ip)))
-    }
-
-    /// Dial ErisDB as this device.
-    pub async fn dial(&self, paths: &Paths) -> Result<erisdb_client::Client> {
-        let key = erislogin::key::load_or_create(&paths.key())?;
-        erisdb_client::Client::dial_addr(self.addr()?, &self.token, &self.installation(), Some(key.to_bytes())).await
-    }
+/// The device list and directory, as the node keeps them.
+pub fn mesh_path(data: &Path) -> PathBuf {
+    data.join("mesh.json")
 }
 
-pub fn installation_name(name: &str) -> String {
-    format!("ErisAuth on {name}")
+/// Every note this device issued.
+pub fn notes_path(data: &Path) -> PathBuf {
+    data.join("notes.json")
 }
 
-/// A request to join ErisDB, redeemed and waiting for someone to approve it.
-pub struct Asking {
-    client: erisdb_client::Client,
-    addr: iroh::EndpointAddr,
-    name: String,
-    expires: i64,
-    /// The code both screens show, to compare.
+/// How long a ticket stays redeemable, and a request answerable.
+pub const TICKET_SECS: i64 = 600;
+
+/// What a ticket this device shows is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Purpose {
+    /// A new device joins the mesh with it.
+    Device,
+    /// An app with no ErisAuth beside it, such as one in a browser, asks for a note with it.
+    App,
+}
+
+/// A join this device started, until it ends.
+#[derive(Debug, Clone, Serialize)]
+pub struct Joining {
+    /// The code to compare with the approving device's screen.
     pub fingerprint: String,
+    /// The approving device's name for itself.
+    pub host: String,
+    /// Why the join failed, once it has.
+    pub error: Option<String>,
 }
 
-/// Redeem a ticket for ErisDB, asking for [`BASE`] and `ceiling` as this
-/// device, named `name`. The request then waits for [`Asking::finish`].
-pub async fn begin_join(paths: &Paths, ticket: &str, name: &str, ceiling: &[String]) -> Result<Asking> {
-    let ticket = erislogin::ticket::Ticket::parse("erisdb", ticket)?;
-    let addr = ticket.endpoint_addr().context("this ticket has no endpoint id; ErisAuth reaches ErisDB over Iroh")?;
-    let key = erislogin::key::load_or_create(&paths.key())?;
-    let installation = installation_name(name);
-    let client =
-        erisdb_client::Client::dial_addr(addr.clone(), &ticket.token, &installation, Some(key.to_bytes())).await?;
-    let requested: Vec<&str> = BASE.iter().copied().chain(ceiling.iter().map(String::as_str)).collect();
-    let session = client.redeem_pairing(&installation, &requested).await?;
-    let fingerprint = session["body"]["fingerprint"].as_str().context("ErisDB sent no fingerprint")?.to_string();
-    let expires = session["body"]["expires"].as_i64().unwrap_or(erislogin::now() + 600);
-    Ok(Asking { client, addr, name: name.to_string(), expires, fingerprint })
+/// Something that changed in the mesh, said the way the person is told it.
+#[derive(Debug, Clone, Serialize)]
+pub struct Event {
+    pub seq: u64,
+    pub at: i64,
+    pub text: String,
 }
 
-impl Asking {
-    /// Wait for the answer; once approved, save the standing and return it
-    /// with the grants this device holds.
-    pub async fn finish(self, paths: &Paths) -> Result<(Joined, Vec<String>)> {
-        let within = Duration::from_secs(self.expires.saturating_sub(erislogin::now()).max(1) as u64);
-        match self.client.await_pairing(within, &erisdb_client::Cancel::new()).await? {
-            erisdb_client::Pairing::Approved { token, granted } => {
-                let joined = Joined {
-                    name: self.name,
-                    eid: self.addr.id.to_string(),
-                    addrs: self.addr.ip_addrs().copied().collect(),
-                    token,
-                };
-                joined.save(paths)?;
-                Ok((joined, granted))
-            }
-            erisdb_client::Pairing::Denied => bail!("the request to join was denied"),
-            erisdb_client::Pairing::TimedOut => bail!("nobody approved the request to join in time"),
-            other => bail!("joining ended without an answer: {other:?}"),
-        }
+/// The most events the daemon remembers.
+const EVENTS: usize = 50;
+
+/// One device's ErisAuth: its key, its node, and everything waiting for the person.
+pub struct Daemon {
+    pub(crate) network: Network,
+    pub(crate) node: Node,
+    pub(crate) pairings: Arc<Pairings>,
+    router: Router,
+    data: PathBuf,
+    notify: bool,
+    /// The notes this device issued, oldest first.
+    issued: Mutex<Vec<Note>>,
+    /// What waits for the person, by request id.
+    pub(crate) requests: Mutex<BTreeMap<Uuid, agent::Pending>>,
+    /// The tickets this device opened and what each is for.
+    pub(crate) sessions: Mutex<BTreeMap<Uuid, Purpose>>,
+    joining: Mutex<Option<Joining>>,
+    events: Mutex<VecDeque<Event>>,
+    /// Whether each other device answered when last asked.
+    pub(crate) reach: Mutex<HashMap<DeviceId, bool>>,
+    changes: watch::Sender<u64>,
+    /// The approval page's link, once it listens.
+    page: OnceLock<String>,
+    tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+}
+
+impl Daemon {
+    /// Load the key and the mesh kept in `data` and start answering on Iroh. With `notify`, the
+    /// person hears of requests and changes through desktop notifications.
+    pub async fn start(data: &Path, network: Network, notify: bool) -> Result<Arc<Self>> {
+        private_dir(data)?;
+        let key = erisoverlaynetwork::key::load_or_create(&key_path(data))?;
+        let endpoint = net::endpoint(key.clone(), &network).await?;
+        let node = Node::start(Config {
+            endpoint: endpoint.clone(),
+            network: network.clone(),
+            local: Local::Device(key),
+            store: Arc::new(FileStore::new(mesh_path(data))),
+        })
+        .await?;
+        let pairings = Arc::new(Pairings::new());
+        let named = node.clone();
+        let router = Router::builder(endpoint)
+            .accept(mesh::ALPN, node.protocol())
+            .accept(ceremony::ALPN, PairService::new(pairings.clone(), move || device_name(&named).unwrap_or_default()))
+            .spawn();
+        let issued = load_notes(&notes_path(data))?;
+        let daemon = Arc::new(Daemon {
+            network,
+            node,
+            pairings,
+            router,
+            data: data.to_path_buf(),
+            notify,
+            issued: Mutex::new(issued),
+            requests: Mutex::new(BTreeMap::new()),
+            sessions: Mutex::new(BTreeMap::new()),
+            joining: Mutex::new(None),
+            events: Mutex::new(VecDeque::new()),
+            reach: Mutex::new(HashMap::new()),
+            changes: watch::channel(0).0,
+            page: OnceLock::new(),
+            tasks: Mutex::new(Vec::new()),
+        });
+        let tasks = vec![
+            tokio::spawn(daemon.clone().follow_sessions()),
+            tokio::spawn(daemon.clone().follow_list()),
+            tokio::spawn(daemon.clone().probe()),
+        ];
+        *daemon.tasks.lock().unwrap_or_else(|e| e.into_inner()) = tasks;
+        Ok(daemon)
     }
+
+    /// Stop answering and let the node go.
+    pub async fn shutdown(&self) {
+        for task in self.tasks.lock().unwrap_or_else(|e| e.into_inner()).drain(..) {
+            task.abort();
+        }
+        let _ = self.router.shutdown().await;
+        self.node.shutdown().await;
+    }
+
+    pub fn node(&self) -> &Node {
+        &self.node
+    }
+
+    pub fn id(&self) -> DeviceId {
+        self.node.id()
+    }
+
+    /// This device's name in the mesh, once it is in one.
+    pub fn name(&self) -> Option<String> {
+        device_name(&self.node)
+    }
+
+    /// Whether this device is a member of a mesh.
+    pub fn is_member(&self) -> bool {
+        self.node.with_list(|list| list.is_some_and(|list| list.is_member(&self.id())))
+    }
+
+    /// A receiver that changes whenever anything the person's screens show does.
+    pub fn subscribe(&self) -> watch::Receiver<u64> {
+        self.changes.subscribe()
+    }
+
+    pub fn version(&self) -> u64 {
+        *self.changes.borrow()
+    }
+
+    pub(crate) fn changed(&self) {
+        self.changes.send_modify(|n| *n = n.wrapping_add(1));
+    }
+
+    pub fn set_page(&self, link: String) {
+        let _ = self.page.set(link);
+    }
+
+    pub fn page(&self) -> Option<String> {
+        self.page.get().cloned()
+    }
+
+    pub fn notifies(&self) -> bool {
+        self.notify
+    }
+
+    pub fn joining(&self) -> Option<Joining> {
+        self.joining.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    pub(crate) fn set_joining(&self, joining: Option<Joining>) {
+        *self.joining.lock().unwrap_or_else(|e| e.into_inner()) = joining;
+        self.changed();
+    }
+
+    /// The notes this device issued, oldest first.
+    pub fn issued(&self) -> Vec<Note> {
+        self.issued.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Keep `note` among those this device issued.
+    pub(crate) fn record(&self, note: Note) -> Result<()> {
+        let mut issued = self.issued.lock().unwrap_or_else(|e| e.into_inner());
+        issued.push(note);
+        let bytes = serde_json::to_vec_pretty(&*issued)?;
+        mesh::write_private(&notes_path(&self.data), &bytes)?;
+        Ok(())
+    }
+
+    /// The latest events, oldest first.
+    pub fn events(&self) -> Vec<Event> {
+        self.events.lock().unwrap_or_else(|e| e.into_inner()).iter().cloned().collect()
+    }
+
+    /// Tell the person something changed.
+    pub(crate) fn tell(&self, text: String) {
+        let event = {
+            let mut events = self.events.lock().unwrap_or_else(|e| e.into_inner());
+            let seq = events.back().map(|e| e.seq + 1).unwrap_or(1);
+            let event = Event { seq, at: erisoverlaynetwork::now(), text };
+            events.push_back(event.clone());
+            while events.len() > EVENTS {
+                events.pop_front();
+            }
+            event
+        };
+        if self.notify {
+            notify::event(&event, self.page());
+        }
+        self.changed();
+    }
+}
+
+/// What this device is called in its mesh, once it is in one.
+fn device_name(node: &Node) -> Option<String> {
+    node.with_list(|list| list.and_then(|list| list.member(&node.id()).map(|m| m.name.clone())))
+}
+
+fn load_notes(path: &Path) -> Result<Vec<Note>> {
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).with_context(|| format!("{} is damaged", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Run ErisAuth on a computer until the process is told to stop: the daemon, the agent socket,
+/// the approval page and, with `notify`, desktop notifications.
+pub async fn serve(paths: &Paths, network: Network, notify: bool) -> Result<()> {
+    // The socket first: a daemon that cannot take it publishes no page link.
+    let listener = socket::bind(&paths.socket())?;
+    let daemon = Daemon::start(&paths.data, network, notify).await?;
+    let (link, page) = page::listen(&paths.runtime, daemon.clone()).await?;
+    daemon.set_page(link);
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let outcome = tokio::select! {
+        served = socket::serve(listener, daemon.clone()) => served,
+        served = page => served,
+        _ = tokio::signal::ctrl_c() => Ok(()),
+        _ = terminate.recv() => Ok(()),
+        _ = daemon.node().closed() => Err(anyhow::anyhow!(
+            "this device's iroh endpoint closed by itself (its sockets failed, as after a network change it \
+             could not rebind to); start erisauth again"
+        )),
+    };
+    let _ = std::fs::remove_file(paths.socket());
+    let _ = std::fs::remove_file(page::link_path(&paths.runtime));
+    daemon.shutdown().await;
+    outcome
 }
 
 /// The approval page's link, as the running daemon wrote it.
@@ -164,43 +326,11 @@ pub fn page_link(paths: &Paths) -> Result<String> {
     Ok(link.trim().to_string())
 }
 
-/// Listen for apps and for the person, on the socket and the approval page,
-/// until the process ends.
-pub async fn serve(paths: &Paths, notify: bool) -> Result<()> {
-    let agent = agent::Agent::new(paths.clone(), notify);
-    if let Some(joined) = Joined::load(paths)? {
-        agent.stand(joined).await?;
-    }
-    // The socket first: a daemon that cannot take it publishes no page link.
-    let listener = socket::bind(&paths.socket())?;
-    let (link, page) = page::listen(&paths.runtime, agent.clone()).await?;
-    agent.set_page(link);
-    tokio::try_join!(socket::serve(listener, agent), page)?;
-    Ok(())
-}
-
 /// Open `link` in the person's browser.
 pub fn open(link: &str) {
-    if let Err(e) = std::process::Command::new("xdg-open").arg(link).status() {
+    if let Err(e) = erisoverlaynetwork::sys::open(link) {
         eprintln!("erisauth: could not open {link}: {e}");
     }
-}
-
-/// Write `bytes` to `path`, readable only by its owner, replacing any file there atomically.
-pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
-    use std::io::Write;
-    let dir = path.parent().context("a private file's path has a directory")?;
-    private_dir(dir)?;
-    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let mut file = options.open(&tmp)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
 }
 
 /// Create `dir` readable only by its owner.

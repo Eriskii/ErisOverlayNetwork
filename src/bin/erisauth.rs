@@ -1,13 +1,12 @@
-//! `erisauth`: join a device, serve apps on it, answer their requests, and
-//! look after the passphrase.
+//! `erisauth`: run ErisAuth on this device, and look after the mesh from a terminal.
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use erisauth::device;
-use uuid::Uuid;
+use erisauth::device::{self, Paths, prompt};
+use erisoverlaynetwork::net::Network;
 
 #[derive(Parser)]
-#[command(version, about = "Sign apps in to Eris services from a device you already trust")]
+#[command(version, about = "The core of each device in an Eris mesh: its key, its devices, and the apps it approves")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -15,78 +14,95 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Join this device to ErisDB, with a ticket from `erisdb pair` or from
-    /// `erisauth add` on a device that has joined.
-    Join {
-        /// What to call this device; its hostname when omitted.
-        #[arg(long)]
-        name: Option<String>,
-        /// A grant this device may approve for apps by itself; repeat for more.
-        /// Everything (`*`) when omitted. Anything beyond takes the passphrase.
-        #[arg(long = "ceiling")]
-        ceiling: Vec<String>,
-        /// The `erisdb://pair/…` ticket.
-        ticket: String,
-    },
-    /// Listen for apps on this device and put their requests to the person.
+    /// Run ErisAuth: the device's node, the agent socket, the approval page, notifications.
     Serve {
         /// Do not show desktop notifications.
         #[arg(long)]
         no_notify: bool,
+        /// How to reach the other devices: `internet`, `loopback`, or a relay URL. `ERIS_NETWORK`
+        /// says when this does not; the internet when neither does.
+        #[arg(long)]
+        network: Option<Network>,
     },
-    /// Show a ticket another device joins with, and approve it here.
+    /// Start a new mesh, with this device as its first member.
+    Init {
+        /// What to call this device; its hostname when omitted.
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Join the mesh of the device showing a ticket (`erisauth add` there).
+    Join {
+        /// What to call this device; its hostname when omitted.
+        #[arg(long)]
+        name: Option<String>,
+        /// The `eris://pair/…` ticket.
+        ticket: String,
+    },
+    /// Show a ticket a new device joins with, and approve it here.
     Add,
-    /// Open the approval page in the browser.
-    Open,
-    /// Answer apps' requests at this terminal.
+    /// Show a ticket an app with no ErisAuth beside it (a browser app) asks with, and approve it here.
+    AddApp,
+    /// Answer what apps and new devices ask, at this terminal.
     Approvals {
         /// Stop after answering one request.
         #[arg(long)]
         once: bool,
     },
-    /// Change the passphrase, typing the current one; with `--reset`, set it
-    /// without, which this device needs `erisauth:reset` for. That is how the
-    /// first passphrase is set.
-    Passphrase {
+    /// List the mesh's devices.
+    Devices,
+    /// Call a device something new.
+    Rename {
+        /// The device: its name, or the start of its id.
+        device: String,
+        name: String,
+    },
+    /// Remove a device from the mesh for good, with the devices it added.
+    Remove {
+        /// The device: its name, or the start of its id.
+        device: String,
+        /// A device it added to keep; repeat for more.
         #[arg(long)]
-        reset: bool,
+        keep: Vec<String>,
+        /// Remove without asking.
+        #[arg(long)]
+        yes: bool,
     },
-    /// Let a device, or every device, guess the passphrase again now. This
-    /// device needs `erisauth:unlock`.
-    Unlock {
-        /// The device's ErisDB installation id; every device when omitted.
-        installation: Option<Uuid>,
+    /// List the apps this device approved.
+    Apps,
+    /// Revoke an app's approval, everywhere.
+    Revoke {
+        /// The app's name, or the start of its note's id.
+        app: String,
     },
+    /// Change ErisDB's passphrase, typing the current one.
+    Passphrase,
+    /// Open the approval page in the browser.
+    Open,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let paths = Paths::from_env()?;
     match Cli::parse().command {
-        Command::Join { name, ceiling, ticket } => {
-            let paths = device::Paths::from_env()?;
-            let name = match name {
-                Some(name) => name,
-                None => std::fs::read_to_string("/proc/sys/kernel/hostname")
-                    .map(|h| h.trim().to_string())
-                    .unwrap_or_else(|_| "this device".into()),
-            };
-            let ceiling = if ceiling.is_empty() { vec!["*".to_string()] } else { ceiling };
-            let asking = device::begin_join(&paths, &ticket, &name, &ceiling).await?;
-            println!("Compare this code with the approving screen: {}", asking.fingerprint);
-            println!("{} asks to approve apps for: {}", device::installation_name(&name), ceiling.join(", "));
-            let (_, granted) = asking.finish(&paths).await?;
-            println!("Joined. This device holds: {}", granted.join(", "));
+        Command::Serve { no_notify, network } => {
+            device::serve(&paths, network.unwrap_or_else(Network::from_env), !no_notify).await?
         }
-        Command::Serve { no_notify } => device::serve(&device::Paths::from_env()?, !no_notify).await?,
-        Command::Add => device::prompt::add(&device::Paths::from_env()?).await?,
+        Command::Init { name } => prompt::init(&paths, &name.unwrap_or_else(prompt::hostname)).await?,
+        Command::Join { name, ticket } => prompt::join(&paths, &name.unwrap_or_else(prompt::hostname), &ticket).await?,
+        Command::Add => prompt::add(&paths, false).await?,
+        Command::AddApp => prompt::add(&paths, true).await?,
+        Command::Approvals { once } => prompt::approvals(&paths, once).await?,
+        Command::Devices => prompt::devices(&paths).await?,
+        Command::Rename { device, name } => prompt::rename(&paths, &device, &name).await?,
+        Command::Remove { device, keep, yes } => prompt::remove(&paths, &device, &keep, yes).await?,
+        Command::Apps => prompt::apps(&paths).await?,
+        Command::Revoke { app } => prompt::revoke(&paths, &app).await?,
+        Command::Passphrase => prompt::passphrase(&paths).await?,
         Command::Open => {
-            let link = device::page_link(&device::Paths::from_env()?)?;
+            let link = device::page_link(&paths)?;
             println!("{link}");
             device::open(&link);
         }
-        Command::Approvals { once } => device::prompt::run(&device::Paths::from_env()?, once).await?,
-        Command::Passphrase { reset } => device::prompt::passphrase(&device::Paths::from_env()?, reset).await?,
-        Command::Unlock { installation } => device::prompt::unlock(&device::Paths::from_env()?, installation).await?,
     }
     Ok(())
 }

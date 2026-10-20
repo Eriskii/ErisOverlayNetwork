@@ -1,21 +1,25 @@
 #!/usr/bin/env bash
 # Builds the approval page, the daemon as a JNI library for arm64 phones and x86_64 emulators,
-# runs the app's unit tests, and builds the debug APK.
+# runs the app's unit tests, and builds the debug APK. Needs the Android SDK and NDK (ANDROID_HOME,
+# Android Studio's ~/Android/Sdk when unset), cargo-ndk, and the aarch64-linux-android and
+# x86_64-linux-android Rust targets.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+export ANDROID_HOME="${ANDROID_HOME:-$HOME/Android/Sdk}"
 npm --prefix web ci --silent
 # The library links everything it uses statically. It builds with the NDK's compilers, as
-# cargo-ndk sets them out, and links with the NDK's clang for each target. Cargo runs from the
-# filesystem root, so a workspace around this checkout that patches dependencies in its Cargo
-# configuration cannot rewrite the lockfile this build is locked to.
-manifest="$PWD/Cargo.toml"
+# cargo-ndk sets them out, and links with the NDK's clang for each target. Cargo runs in this
+# checkout, so the Cargo configuration around it, the Eris monorepo's, which builds the mesh
+# library from its own checkout there, applies as it does to every build of ErisAuth. That
+# configuration's patches for crates ErisAuth does not use land in the lockfile in no fixed
+# order, so the build may rewrite it and is not run --locked.
 declare -A triple=([arm64-v8a]=aarch64-linux-android [x86_64]=x86_64-linux-android)
 for abi in arm64-v8a x86_64; do
   target="${triple[$abi]}"
   (
     source <(cargo ndk-env -t "$abi")
     export "CARGO_TARGET_$(tr 'a-z-' 'A-Z_' <<<"$target")_LINKER=$(dirname "$CLANG_PATH")/${target}21-clang"
-    cd / && cargo build --manifest-path "$manifest" -p erisauth-android --target "$target" --release --locked
+    cargo build -p erisauth-android --target "$target" --release
   )
   mkdir -p "android/app/src/main/jniLibs/$abi"
   rm -f "android/app/src/main/jniLibs/$abi"/*.so

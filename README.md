@@ -1,173 +1,147 @@
 # ErisAuth
 
-Sign apps in to Eris services from a device you already trust, with one approval. Crate
-`erisauth`.
+The core of each device in an Eris mesh: it holds the device's key, keeps the list of the person's
+devices, and approves the apps that ask. Crate `erisauth`.
 
-ErisAuth builds on [ErisLogin](https://github.com/Eriskii/ErisLogin), the pairing every Eris service
-speaks on its own: a ticket, a fingerprint on both screens, and a person approving all, some or none
-of what an app asks for. Every app keeps working with ErisLogin alone; ErisAuth approves on the
-person's behalf, and nothing an app does afterwards passes through it.
+A person's devices form one mesh, built on
+[ErisOverlayNetwork](https://github.com/Eriskii/ErisOverlayNetwork). Membership is a signed list of
+the devices, which every device keeps and checks for itself; any device in the mesh adds the next one
+or removes another. Apps are not members: a device approves an app with a signed note naming its key,
+the service it takes part in and the grants it holds there. A mesh service such as ErisFiles takes one
+tap. ErisDB, the enclave, takes a tap and the ErisDB passphrase, which ErisDB itself checks. A device
+needs no ErisDB to start a mesh, join one, or approve apps for anything else.
 
 ## On a device
 
-A device joins ErisDB once, as an installation of its own over Iroh:
+`erisauth serve` runs ErisAuth: the device's key and node, the agent socket apps ask on, the approval
+page, and desktop notifications (`--no-notify` turns those off). It reaches the other devices over the
+internet, through n0's relays and on the local network without them; `--network` or `ERIS_NETWORK`
+says otherwise: `loopback`, or a relay URL to use that relay and nothing else. The device's key, the
+mesh and the notes it issued live in `$XDG_DATA_HOME/erisauth/` (`key`, `mesh.json`, `notes.json`);
+the socket and the page's link in `$XDG_RUNTIME_DIR/erisauth/` — on macOS, which has no
+`XDG_RUNTIME_DIR`, in `$TMPDIR/erisauth/`, and notifications go to Notification Center, from which
+the page opens with `erisauth open`. Every other command asks the running daemon.
+
+Start a mesh on one device, then add each next one from any device already in it:
 
 ```sh
-erisauth join --name laptop --ceiling 'notes:*' --ceiling 'tasks:*' 'erisdb://pair/…'
+erisauth init --name laptop                       # the first device
+erisauth add                                      # on any device in the mesh: shows a ticket
+erisauth join --name phone 'eris://pair/…'        # on the new device
 ```
 
-Cut the ticket with `erisdb pair`, or show one on a device that has joined (below), compare the
-fingerprint, and approve. A device without a terminal joins from its approval page instead: a daemon
-that has not joined shows a form for the ticket, a name and the ceiling, then the fingerprint, and
-becomes a working device once someone approves. A link to the page carrying `&join=<ticket>` in its
-fragment fills the ticket in. The device asks for the
-right to open and approve pairings, to ask [ErisAuth in ErisDB](#in-erisdb), and to announce itself to and invite the
-other devices, plus its ceiling: the grants it may
-approve for an app by itself. Without `--ceiling` the ceiling is everything (`*`). Its key and
-standing live in `$XDG_DATA_HOME/erisauth/`.
+`erisauth add` shows the ticket as a QR code and as text. The new device redeems it and both screens
+show the same fingerprint; the person compares them and approves on the device that showed the
+ticket. The newcomer then holds the list and learns of every other device, wherever they are.
 
-`erisauth serve` then listens on `$XDG_RUNTIME_DIR/erisauth/agent.sock`, where apps look for it with
-ErisLogin's `agent` module. An ErisDB app in Rust does all of it in one call,
-`erisdb_client::pair_via_erisauth`, which returns `None` when no ErisAuth is listening:
+| Command                                   | What it does                                                    |
+| ----------------------------------------- | --------------------------------------------------------------- |
+| `erisauth devices`                        | List the devices: who added each, when, and whether it answers  |
+| `erisauth rename DEVICE NAME`             | Call a device something new                                     |
+| `erisauth remove DEVICE [--keep D] [--yes]` | Remove a device for good, with the devices it added           |
+| `erisauth approvals [--once]`             | Answer what apps and new devices ask, at this terminal          |
+| `erisauth add-app`                        | Show a ticket for an app with no ErisAuth beside it             |
+| `erisauth apps`                           | List the apps this device approved                              |
+| `erisauth revoke APP`                     | Revoke an app's note, everywhere                                |
+| `erisauth passphrase`                     | Change ErisDB's passphrase, typing the current one              |
+| `erisauth open`                           | Open the approval page                                          |
 
-1. The app says which service it wants, its name, the grants and the key it will redeem with.
-2. The device cuts a pairing at ErisDB and hands the app the ticket. The app redeems it exactly as it
-   would a scanned one.
-3. The device checks that the redeemer is the app that asked: the same key, name and grants.
-   Anything else is denied before the person sees it.
-4. The person is asked, with the program's path as the kernel reports it, not as the app claims.
-   They approve it as asked, approve part of it, or say no.
-5. What fits inside the device's grants, the device approves itself. Anything more goes to ErisAuth in ErisDB, and
-   the person types the passphrase.
-6. The app hears the answer and collects its own credential from ErisDB. From then on it talks to
-   ErisDB directly.
+A device is named by its name or the start of its id. Removing a device offers the devices it added
+as removed with it; each goes unless the person keeps it (`--keep` at the terminal, an unticked box on
+the page), and one removal carries them all. A removed device never counts again: to come back it
+joins anew, with a new key.
 
-An app that hangs up withdraws its request, and ErisDB denies the pairing. With no ErisAuth listening,
-the app pairs by ticket as it always can.
+Every device tells its person what the others change: "laptop added phone", "laptop removed phone,
+tablet", "server approved ErisDB as your ErisDB". A removed device hears it was removed. Each device
+asks the others now and then whether they answer, so the list shows which are reachable.
 
-The person answers on the approval page, or at a terminal with `erisauth approvals`, which prompts
-for each request as it arrives. The daemon serves the page on loopback and shows a desktop
-notification for each request, unless it runs with `--no-notify`; choosing the notification, or
-running `erisauth open`, opens the page. The page's API takes a token the daemon makes when it
-starts, handed over in the link it writes to `$XDG_RUNTIME_DIR/erisauth/page` (mode 0600) in the URL
-fragment, which the browser never sends. Any process of the same user can
-reach the socket, as it can read the device's key. What the device approves by itself is within its
-ceiling either way, and the passphrase stands between such a process and anything beyond it.
+## Apps
 
-### Adding a device from one you have
+An app beside ErisAuth asks over `$XDG_RUNTIME_DIR/erisauth/agent.sock`, with the mesh library's
+`agent` module: approve this key for this service, with these grants, serving it or not. The person
+sees the program as the kernel names it, from the socket peer's `/proc/<pid>/exe`, never as the app
+claims; it goes in the note's `program`. They approve as asked, approve part of the grants, or deny.
+The app hears its note and a snapshot of the mesh, or the denial; hanging up withdraws the request.
 
-A device that has joined adds the next one; nothing needs running on the ErisDB machine. On the page,
-**Add a device** shows a QR code and the command to run on the new device; at a terminal,
-`erisauth add` prints both and waits:
+- A mesh service, such as ErisFiles serving `files`, takes one tap.
+- An app asking to serve `erisdb` asks to be the mesh's ErisDB; the prompt says so, and which ErisDB it
+  replaces. A mesh has one: approving it issues its note and revokes every other approval to serve
+  `erisdb` the device knows of. Every device and app finds ErisDB as the app approved to serve it,
+  the most recently approved should two ever count at once, and talks to no other.
+- An app for `erisdb` that does not serve it takes the ErisDB passphrase too. The device issues the
+  app's note and enrolls it at the mesh's ErisDB, `POST /v1/enroll {note, passphrase}` over Iroh
+  `erisdb/0` from the device's own key, and the app hears it is approved only once ErisDB has
+  accepted. A wrong passphrase lets the person try again; once ErisDB locks the device out, the person
+  hears how long to wait.
 
-```sh
-erisauth join --name phone --ceiling 'notes:*' 'erisdb://pair/…'   # on the new device
-```
+An app with no ErisAuth beside it, such as one in a browser, asks by ticket instead: **Add a browser
+app** on the page, or `erisauth add-app`, shows one, the app redeems it with its own key, and the
+request comes to the person like any other, with the fingerprint both screens show to compare. For
+ErisDB the person types the passphrase there too.
 
-The ticket crosses from one screen to another, so the person compares the fingerprint both show before
-approving, as with any ErisLogin pairing. What makes the newcomer an ErisAuth device is granted or
-refused whole; its ceiling can be narrowed. A ceiling beyond the approving device's own grants takes
-the passphrase.
+`erisauth apps` lists every note this device issued and whether it still counts; `erisauth revoke`
+revokes one, and it stops counting on every device and at every service at once.
+
+## ErisDB's passphrase
+
+The passphrase is ErisDB's: it keeps it, checks it and counts wrong guesses per device. From a device
+in the mesh, `erisauth passphrase` (or the page) changes it with the current one, `POST /v1/passphrase`.
+Setting the first one, resetting it and letting a locked-out device guess again happen where ErisDB
+runs: `erisdb passphrase set`, `erisdb passphrase unlock`.
+
+## The approval page
+
+The daemon serves the page on loopback. It shows what waits for the person, the devices, the apps this
+device approved, the mesh's ErisDB and what changed lately, and adds devices and browser apps. The
+page's files hold no data; its API, `GET /api/state` and `POST /api/command`, takes a token the daemon
+makes when it starts, handed over in the link it writes to `$XDG_RUNTIME_DIR/erisauth/page` (mode
+0600) in the URL fragment, which the browser never sends. Its policy allows no framing and no script
+but its own. Choosing a notification, or running `erisauth open`, opens it.
+
+The page, the terminal and the Android app's screens all send the daemon the same commands, one JSON
+object each; [`src/device/command.rs`](src/device/command.rs) lists them and the state they read.
+Any process of this user can reach the socket, as it can read the device's key.
 
 ## On Android
 
-The app `dev.eris.auth` (in `android/`) runs the same daemon in its own process, with its own
-Material screens rather than the approval page: they send the daemon the commands its socket takes
-(`device::command`), through one JNI call, and nothing listens on the network for them. A phone
-joins from its join screen, or by opening an `erisdb://pair/…` ticket with the camera, which fills
-the ticket in. Adding a device shows the ticket as a QR code the app draws from the modules the
-daemon lays out; the screens with a ticket or a passphrase on them are kept out of screenshots.
+The app `dev.eris.auth` (in `android/`) runs the same daemon in its own process, with Material screens
+of its own: starting or joining a mesh (paste the ticket, or scan it with the camera, which opens the
+`eris://pair/…` link in the app), the devices, adding a device or a browser app with a QR code, the
+apps it approved, what waits for the person, and the passphrase. Screens with a ticket or a passphrase
+on them are kept out of screenshots. It posts a notification for each request and each change.
 
 Android apps cannot reach one another's sockets, so apps bind ErisAuth's service instead, with the
-`dev.eris.auth.SIGN_IN` action. Android tells the service which app is calling: the request and the
-notification show its package and the SHA-256 of its signing certificate, not a name the app chose.
-The conversation is the socket's: ask, receive the ticket, redeem it with the app's own key, hear
-the answer. An app that goes away withdraws its request, and only the app that opened a request can
-withdraw it.
+`dev.eris.auth.SIGN_IN` action. Android tells the service which app is calling: the prompt shows its
+package and the SHA-256 of its signing certificate, and the note's `program` records them as
+`dev.example.notes sha256:<hex>`. The conversation is the socket's: the request is the socket's
+request line, the answer its reply line. An app that goes away withdraws its request, and only the app
+that asked can withdraw it.
 
-Apps use the client library in `android/client`:
+Apps use the client library in `android/client`, two files to vendor as they are:
 
 ```kotlin
 ErisAuth.connect(context) { erisAuth ->
-    if (erisAuth == null) return@connect showScanOrPaste()   // no ErisAuth here: pair by ticket
-    erisAuth.ask("erisdb", "Notes", listOf("notes:read"), ErisAuth.Identity.iroh(keyHex), object : ErisAuth.Listener {
-        override fun onTicket(ticket: String) = redeemWithMyKey(ticket)
-        override fun onAnswer(answer: ErisAuth.Answer) = if (answer is ErisAuth.Answer.Approved) collect() else fail()
-    })
+    if (erisAuth == null) return@connect showTicketFlow()        // no ErisAuth on this phone
+    val request = erisAuth.approve("files", "ErisFiles", listOf("files:read"), serves = true, app = myKeyHex) { answer ->
+        when (answer) {
+            is ErisAuth.Answer.Approved -> keep(answer.note, answer.snapshot)
+            is ErisAuth.Answer.Denied -> tell(answer.why)
+            is ErisAuth.Answer.Failed -> tell(answer.why)
+        }
+    }
 }
 ```
 
-Its manifest declares the `<queries>` entry an app needs to see ErisAuth. The calls are written out
-as Binder transactions in `Wire.kt` rather than generated from AIDL, so the client and the service
-share one definition.
+`request.withdraw()` takes a request back, `erisAuth.snapshot { json -> }` reads the mesh as the phone
+has it, and `erisAuth.close()` lets ErisAuth go. `ErisAuth.kt` is the API; `Wire.kt` writes the Binder
+transactions out rather than generating them from AIDL, so the client and the service share one
+definition: `ASK(requestId, requestJson, callback)` and `WITHDRAW(requestId)` to the service,
+`ANSWER(json)` to the callback, all one-way. The library's manifest declares the `<queries>` entry an
+app needs to see ErisAuth.
 
 Build it with `scripts/build-android.sh`, which needs the Android SDK and NDK, `cargo-ndk`, and the
-`aarch64-linux-android` and `x86_64-linux-android` Rust targets. It builds the page and the JNI
-library for both, runs the Kotlin unit tests, and assembles the debug APK.
-
-## In ErisDB
-
-ErisAuth is also a plugin in [ErisDB](https://github.com/Eriskii/ErisDB): a manifest and an
-executable, run once per call like any ErisDB plugin. It approves a pending pairing for a registered
-ErisAuth device that brings the passphrase. A device approves what fits inside its own grants by
-itself; for anything more it asks ErisAuth in ErisDB, and the person types the passphrase. A stolen
-device without the passphrase gets only its own grants, and the passphrase without an enrolled device
-gets nothing.
-
-The plugin keeps nothing of its own. Its manifest names the grants it acts with, `*` as shipped, and
-ErisDB hands it a capability for exactly those with each call, good until the call's timeout. Narrow
-`grants` in the manifest to cap what a passphrase can ever approve; a device can approve through the
-plugin only what those grants enclose.
-
-| Operation    | Permission            | Input                                          | Answer                 |
-| ------------ | --------------------- | ---------------------------------------------- | ---------------------- |
-| `approve`    | `erisauth:approve`    | `{pairing, granted, identity, passphrase}`     | `200 {approved}`       |
-| `passphrase` | `erisauth:passphrase` | `{current, new}`, `new` at least 8 characters  | `200 {changed: true}`  |
-| `reset`      | `erisauth:reset`      | `{new}`, at least 8 characters                 | `200 {reset: true}`    |
-| `unlock`     | `erisauth:unlock`     | `{installation?}`                              | `200 {unlocked: true}` |
-
-`approve` approves `pairing` with `granted` only when the key that redeemed it is `identity`, the app
-the device vouched for. `passphrase` changes the passphrase given the current one; `reset` sets it
-without, which is how the first one is set, and starts every device's count of wrong guesses afresh.
-`unlock` lets one device, or every device, guess again now. Every ErisAuth device holds
-`erisauth:approve` and `erisauth:passphrase`; only a device whose ceiling covers `erisauth:reset` or
-`erisauth:unlock`, such as one that approves everything, can reset or unlock. Refusals are JSON
-`{error, message}`:
-
-| Status | `error`            | Meaning                                                               |
-| ------ | ------------------ | --------------------------------------------------------------------- |
-| 403    | `not_a_device`     | The caller is not a registered installation (a manual token)          |
-| 403    | `wrong_passphrase` | Counted against this device                                           |
-| 429    | `locked`           | This device waits `retry_after` seconds before guessing again         |
-| 404    | `no_such_pairing`  |                                                                       |
-| 409    | `not_waiting`      | The pairing is not waiting for an answer                              |
-| 409    | `not_the_app`      | A different key redeemed the pairing than the device vouched for      |
-| 503    | `no_passphrase`    | Nobody has set a passphrase yet                                       |
-
-The plugin keeps the passphrase as an Argon2id hash in ErisDB's `erisauth.passphrase` facet, with
-each device's wrong guesses; its writes there are signed as the user `plugin:erisauth`. A device has
-three free guesses; then it waits a minute, then two, then four, doubling up to a day. A right guess
-clears its count, and one device's guesses never lock out another.
-
-### Install
-
-Put the executable where the manifest says and the manifest in ErisDB's plugin directory, then
-restart ErisDB:
-
-```sh
-cargo build --release --locked --bin erisdb-plugin-erisauth
-sudo install -m 0755 target/release/erisdb-plugin-erisauth /usr/local/libexec/erisdb/
-sudo install -m 0644 deploy/erisauth.json /etc/erisdb/plugins.d/
-```
-
-That is all there is to it on the ErisDB machine. Set the first passphrase from a device that
-may reset it: **Passphrase** on its page, leaving the current one empty, or at its terminal:
-
-| Command                          | What it does                                                 |
-| -------------------------------- | ------------------------------------------------------------ |
-| `erisauth passphrase`            | Change the passphrase, typing the current one                |
-| `erisauth passphrase --reset`    | Set it without the current one; the device needs `erisauth:reset` |
-| `erisauth unlock [INSTALLATION]` | Let one device, or every device, guess again now; needs `erisauth:unlock` |
+`aarch64-linux-android` and `x86_64-linux-android` Rust targets. It builds the page and the JNI library
+for both, runs the Kotlin unit tests, and assembles the debug APK.
 
 ## Building and testing
 
@@ -177,9 +151,11 @@ build needs Node 22+ and npm.
 ```sh
 cargo test
 (cd web && npm run check && npm test)
-./android/gradlew -p android testDebugUnitTest   # after scripts/build-android.sh has built the library
+./android/gradlew -p android testDebugUnitTest
 ```
 
-The suite runs a real Postgres (Docker), a real ErisDB core serving the shipped manifest over HTTP
-and Iroh, the real `erisauth` daemon and plugin executables, and apps that pair over Iroh with keys
-of their own.
+The suite runs the real `erisauth` daemon as separate devices on loopback Iroh, each with its own data
+and runtime directories, and drives them as the person and the apps do: meshes started, joined by
+ticket through one another and changed, apps approved over the socket and by ticket. The ErisDB tests
+run ErisDB's real core on a real Postgres (Docker); they build it from `ERISDB_SOURCE`, its `erisdb`
+crate (beside this checkout in the Eris monorepo by default), or take it from `ERISDB_BIN`.

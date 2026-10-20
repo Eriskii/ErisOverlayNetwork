@@ -4,18 +4,29 @@ import android.content.Context
 import java.io.File
 import org.json.JSONObject
 
-/** ErisAuth's daemon, in this process. Every call answers JSON and blocks, so call off the main thread. */
+/**
+ * ErisAuth's daemon, in this process. `command` and `request` block until they have an answer,
+ * so they are called off the main thread.
+ */
 object Native {
     init {
         System.loadLibrary("erisauth_android")
     }
 
-    external fun start(data: String, runtime: String): String
+    /** Start the daemon with its key and mesh in [data]: `{"ok":true}` or `{"error","message"}`. */
+    external fun start(data: String): String
+
+    /** One command from the app's screens, as the daemon's socket takes it. */
     external fun command(message: String): String
-    external fun ask(ask: String, caller: String): String
-    external fun answer(id: String): String
-    external fun asked(id: String, withinMs: Long): String
-    external fun withdraw(id: String)
+
+    /**
+     * An app's request [line], exactly as an app sends it on the agent socket, from [caller] (its
+     * package, certificate and pid, as JSON). Answers the agent socket's reply line; [key] takes
+     * the request back with [withdraw].
+     */
+    external fun request(key: String, line: String, caller: String): String
+
+    external fun withdraw(key: String)
 
     @Volatile private var started = false
 
@@ -23,12 +34,12 @@ object Native {
     @Synchronized
     fun ensureStarted(context: Context): Result<Unit> {
         if (started) return Result.success(Unit)
-        val answer = JSONObject(start(File(context.filesDir, "erisauth").path, context.cacheDir.path))
-        if (answer.has("error")) return Result.failure(IllegalStateException(answer.getString("error")))
+        val answer = JSONObject(start(File(context.filesDir, "erisauth").path))
+        if (answer.has("error")) return Result.failure(IllegalStateException(answer.optString("message", answer.optString("error"))))
         started = true
         return Result.success(Unit)
     }
 
-    /** One command from the app's screens, as the daemon's socket takes it. */
+    /** One command, as JSON both ways. */
     fun run(message: JSONObject): JSONObject = JSONObject(command(message.toString()))
 }

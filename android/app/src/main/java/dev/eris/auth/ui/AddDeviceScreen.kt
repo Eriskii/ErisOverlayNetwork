@@ -3,6 +3,7 @@ package dev.eris.auth.ui
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -10,12 +11,12 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -23,8 +24,10 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -36,52 +39,75 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import dev.eris.auth.Opened
 import dev.eris.auth.Qr
-import dev.eris.auth.refusalOf
+import dev.eris.auth.State
+import dev.eris.auth.refusal
 import dev.eris.auth.remaining
 import kotlin.math.floor
-import org.json.JSONObject
+import kotlinx.coroutines.launch
 
 /**
- * A ticket a new device joins with, as a QR code for its camera and as text to paste. Once the
- * new device asks, its request shows on the home screen with a code to compare.
+ * A ticket, as a QR code for a camera and as text to paste: for a new device to join with, or,
+ * with [app], for an app with no ErisAuth beside it (one in a browser) to ask with. Once the
+ * newcomer asks, its request waits under Requests with a code to compare, and [onDone] hears
+ * `true`. Leaving earlier closes the ticket, so nobody can redeem it.
  */
 @Composable
-fun AddDeviceScreen(waiting: List<String>, now: Long, onBack: () -> Unit) {
+fun TicketScreen(app: Boolean, state: State, now: Long, onDone: (asked: Boolean) -> Unit) {
     val context = LocalContext.current
-    var added by remember { mutableStateOf<JSONObject?>(null) }
-    var error by remember { mutableStateOf("") }
+    val scope = rememberCoroutineScope()
+    var opened by remember { mutableStateOf<Opened?>(null) }
+    var error by remember { mutableStateOf<String?>(null) }
+    // Each new ticket the person asks for.
+    var round by remember { mutableIntStateOf(0) }
 
-    LaunchedEffect(Unit) {
-        val answer = command(JSONObject().put("op", "add"))
-        if (answer.has("ticket")) added = answer else error = refusalOf(answer)
+    LaunchedEffect(round) {
+        val answer = command(op(if (app) "add_app" else "add"))
+        error = refusal(answer)
+        if (error == null) opened = Opened.parse(answer)
     }
-    LaunchedEffect(waiting, added) {
-        if (added?.optString("id") in waiting) onBack()
+    val shown = opened
+    LaunchedEffect(state.approvals, shown) {
+        if (shown != null && state.approvals.any { it.id == shown.id }) onDone(true)
     }
+    fun leave() {
+        val id = shown?.id
+        scope.launch {
+            if (id != null) command(op("close").put("id", id))
+            onDone(false)
+        }
+    }
+    BackHandler { leave() }
 
     Column(Modifier.fillMaxSize()) {
         SecureWindow()
-        Header(title = "Add a device", onBack = onBack)
+        Header(title = if (app) "Add a browser app" else "Add a device", onBack = { leave() })
         Column(
             Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            val ticket = added?.optString("ticket")
-            val qr = added?.optJSONObject("qr")?.let(Qr::parse)
             when {
-                error.isNotEmpty() -> Text(error, color = MaterialTheme.colorScheme.error)
-                ticket == null || qr == null -> CircularProgressIndicator()
+                error != null -> Problem(error)
+                shown == null -> CircularProgressIndicator()
+                shown.expires <= now -> {
+                    Text("This ticket has expired.", style = MaterialTheme.typography.bodyMedium)
+                    Button(onClick = {
+                        opened = null
+                        round += 1
+                    }) { Text("Show a new one") }
+                }
                 else -> {
                     Text(
-                        "Scan this with the new device's camera, or run on it:",
+                        if (app) "Open the app and give it this ticket: scan the code, or paste the text."
+                        else "On the new device, scan this code, or paste the ticket into its ErisAuth.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    QrCode(qr)
+                    QrCode(shown.qr)
                     Text(
-                        "erisauth join '$ticket'",
+                        shown.ticket,
                         style = MaterialTheme.typography.bodySmall,
                         fontFamily = FontFamily.Monospace,
                         maxLines = 2,
@@ -90,16 +116,16 @@ fun AddDeviceScreen(waiting: List<String>, now: Long, onBack: () -> Unit) {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(onClick = {
                             context.getSystemService(ClipboardManager::class.java)
-                                .setPrimaryClip(ClipData.newPlainText("ErisDB ticket", ticket))
+                                .setPrimaryClip(ClipData.newPlainText("ErisAuth ticket", shown.ticket))
                         }) { Text("Copy") }
                         OutlinedButton(onClick = {
-                            val send = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, ticket)
+                            val send = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, shown.ticket)
                             context.startActivity(Intent.createChooser(send, "Send the ticket"))
                         }) { Text("Share") }
                     }
                     Text(
-                        "Good for ${remaining(added?.optLong("expires") ?: 0, now)}. Its request appears here with a " +
-                            "code to compare; approve it once both screens match.",
+                        "Good for ${remaining(shown.expires, now)}. The code grants nothing by itself: what asks with " +
+                            "it waits under Requests, with a code to compare on both screens.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
