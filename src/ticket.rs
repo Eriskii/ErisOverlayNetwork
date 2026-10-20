@@ -74,10 +74,8 @@ impl Ticket {
 
     /// Read a ticket.
     pub fn parse(s: &str) -> Result<Self> {
-        let payload = s
-            .trim()
-            .strip_prefix(SCHEME)
-            .ok_or_else(|| Error::BadRequest(format!("a ticket starts with {SCHEME}")))?;
+        let payload =
+            s.trim().strip_prefix(SCHEME).ok_or_else(|| Error::BadRequest(format!("a ticket starts with {SCHEME}")))?;
         let json = B64.decode(payload).map_err(|_| Error::BadRequest("ticket payload is not base64url".into()))?;
         let ticket: Ticket = serde_json::from_slice(&json)
             .map_err(|e| Error::BadRequest(format!("ticket payload is not a ticket: {e}")))?;

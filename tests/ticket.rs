@@ -34,6 +34,7 @@ fn damaged_foreign_or_unknown_version_tickets_are_refused() {
     assert!(Ticket::parse("eris://pair/e30").is_err());
     assert!(Ticket::parse("erisdb://pair/e30").is_err());
     use base64::Engine;
-    let v1 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(format!(r#"{{"v":1,"eid":"{}","token":"t"}}"#, eid()));
+    let v1 =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(format!(r#"{{"v":1,"eid":"{}","token":"t"}}"#, eid()));
     assert!(Ticket::parse(&format!("{SCHEME}{v1}")).is_err());
 }

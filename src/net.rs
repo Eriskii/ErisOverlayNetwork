@@ -25,15 +25,40 @@ pub enum Network {
 }
 
 impl Network {
-    /// `ERIS_NETWORK`: `loopback`, a relay URL, or anything else (or nothing) for the internet.
+    /// `ERIS_NETWORK`, read as [`Network::from_str`] reads; the internet when it is unset or
+    /// does not read.
     pub fn from_env() -> Self {
-        match std::env::var("ERIS_NETWORK").ok().as_deref() {
-            Some("loopback") => Network::Loopback,
-            Some(url) if url.starts_with("http") => match url.parse() {
-                Ok(url) => Network::Relay(url),
-                Err(_) => Network::Internet,
-            },
-            _ => Network::Internet,
+        let value = std::env::var("ERIS_NETWORK").unwrap_or_default();
+        value.parse().unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "ERIS_NETWORK does not read; using the internet");
+            Network::Internet
+        })
+    }
+}
+
+impl std::str::FromStr for Network {
+    type Err = Error;
+
+    /// `internet` or nothing, `loopback`, or a relay's `http://` or `https://` URL.
+    fn from_str(s: &str) -> Result<Self> {
+        match s.trim() {
+            "" | "internet" => Ok(Network::Internet),
+            "loopback" => Ok(Network::Loopback),
+            url if url.starts_with("http://") || url.starts_with("https://") => url
+                .parse()
+                .map(Network::Relay)
+                .map_err(|e| Error::BadRequest(format!("{url:?} is not a relay URL: {e}"))),
+            other => Err(Error::BadRequest(format!("{other:?} is not a network: internet, loopback, or a relay URL"))),
+        }
+    }
+}
+
+impl std::fmt::Display for Network {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Network::Internet => f.write_str("internet"),
+            Network::Loopback => f.write_str("loopback"),
+            Network::Relay(url) => write!(f, "{url}"),
         }
     }
 }

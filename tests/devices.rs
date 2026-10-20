@@ -207,21 +207,3 @@ fn names_are_checked() {
     assert!(list.append(&laptop, Op::Add { device: phone.public(), name: "x".repeat(65) }).is_err());
     assert!(DeviceList::create(&laptop, "").is_err());
 }
-
-#[test]
-fn a_pin_names_the_app_providing_a_service_until_replaced_or_revoked() {
-    let (laptop, phone) = (key(), key());
-    let (mut list, _) = DeviceList::create(&laptop, "laptop").unwrap();
-    add(&mut list, &laptop, &phone, "phone");
-    let (db, db2) = (key().public(), key().public());
-    let note = erisoverlaynetwork::NoteId([1; 32]);
-    let note2 = erisoverlaynetwork::NoteId([2; 32]);
-    list.append(&laptop, Op::Pin { service: "erisdb".into(), app: db, note }).unwrap();
-    assert_eq!(list.pinned("erisdb").unwrap().app, db);
-    assert_eq!(list.pinned("erisdb").unwrap().by, laptop.public());
-    list.append(&phone, Op::Pin { service: "erisdb".into(), app: db2, note: note2 }).unwrap();
-    assert_eq!(copy(&list).pinned("erisdb").unwrap().app, db2);
-    list.append(&laptop, Op::Revoke { note: note2 }).unwrap();
-    assert!(list.pinned("erisdb").is_none());
-    assert!(list.append(&laptop, Op::Pin { service: "Not Ok".into(), app: db, note }).is_err());
-}

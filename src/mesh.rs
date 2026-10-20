@@ -42,6 +42,10 @@ pub const ALPN: &[u8] = b"eris-mesh/0";
 /// How often a node syncs with everyone, besides when it starts and when it moves.
 pub const ANNOUNCE: Duration = Duration::from_secs(300);
 
+/// How long a node waits before trying again a participant it could not sync with: then
+/// again, and then it leaves it to the next announce.
+pub const RETRY: [Duration; 3] = [Duration::from_secs(2), Duration::from_secs(10), Duration::from_secs(30)];
+
 /// How recently a node must have synced with a participant before it dials it for a service.
 pub const FRESH: Duration = Duration::from_secs(120);
 
@@ -136,7 +140,7 @@ pub fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let tmp = path.with_extension("tmp");
+    let tmp = path.with_extension(format!("tmp.{:016x}", rand::random::<u64>()));
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -217,6 +221,8 @@ struct Inner {
     lookup: MemoryLookup,
     conns: Mutex<HashMap<EndpointId, Connection>>,
     synced: Mutex<HashMap<EndpointId, n0_future::time::Instant>>,
+    /// Held across reading the state and writing it, so the store always ends up with the newest.
+    saving: tokio::sync::Mutex<()>,
     tasks: Mutex<Vec<AbortOnDropHandle<()>>>,
 }
 
@@ -261,6 +267,7 @@ impl Node {
                 lookup,
                 conns: Mutex::new(HashMap::new()),
                 synced: Mutex::new(HashMap::new()),
+                saving: tokio::sync::Mutex::new(()),
                 tasks: Mutex::new(Vec::new()),
             }),
         };
@@ -299,10 +306,23 @@ impl Node {
         self.read(|s| s.list.clone())
     }
 
+    /// Look at the list as this node has it, without copying it.
+    pub fn with_list<R>(&self, f: impl FnOnce(Option<&DeviceList>) -> R) -> R {
+        self.read(|s| f(s.list.as_ref()))
+    }
+
+    /// Whether `note` counts now: same mesh, its device a member, not revoked.
+    pub fn counts(&self, note: &Note) -> bool {
+        self.with_list(|list| list.is_some_and(|l| note.check(l).is_ok()))
+    }
+
     /// The mesh's member devices.
     pub fn members(&self) -> Vec<(DeviceId, Member)> {
         self.read(|s| {
-            s.list.as_ref().map(|l| l.state().members.iter().map(|(d, m)| (*d, m.clone())).collect()).unwrap_or_default()
+            s.list
+                .as_ref()
+                .map(|l| l.state().members.iter().map(|(d, m)| (*d, m.clone())).collect())
+                .unwrap_or_default()
         })
     }
 
@@ -322,17 +342,10 @@ impl Node {
         })
     }
 
-    /// The presence of the app pinned to provide `service`, when it still counts.
-    pub fn pinned(&self, service: &str) -> Option<Presence> {
-        let me = self.id();
-        self.read(|s| {
-            let list = s.list.as_ref()?;
-            let pin = *list.pinned(service)?;
-            if pin.app == me {
-                return None;
-            }
-            s.directory.get(&pin.app).filter(|p| p.note().is_some_and(|n| n.id == pin.note)).cloned()
-        })
+    /// The one app providing `service`, for a service a mesh has one of, such as ErisDB: of
+    /// the apps approved to serve it, the most recently approved. This node itself is not one.
+    pub fn provider(&self, service: &str) -> Option<Presence> {
+        self.providers(service).into_iter().max_by_key(|p| p.note().map(|n| (n.body.at, n.id)))
     }
 
     /// Everything a newcomer needs, this node's own presence included.
@@ -356,8 +369,10 @@ impl Node {
     pub fn authorize(&self, caller: EndpointId, service: &str, required: Option<&str>) -> Result<Caller> {
         self.read(|s| {
             let list = s.list.as_ref().ok_or(Error::Unauthorized)?;
-            let presence = s.directory.get(&caller).ok_or(Error::Forbidden { permission: "a known participant".into() })?;
-            let note = presence.note().ok_or(Error::Forbidden { permission: format!("an app approved for {service}") })?;
+            let presence =
+                s.directory.get(&caller).ok_or(Error::Forbidden { permission: "a known participant".into() })?;
+            let note =
+                presence.note().ok_or(Error::Forbidden { permission: format!("an app approved for {service}") })?;
             note.check(list)?;
             if note.app() != caller || note.body.service != service {
                 return Err(Error::Forbidden { permission: format!("an app approved for {service}") });
@@ -420,11 +435,12 @@ impl Node {
         let Local::Device(key) = &self.inner.local else {
             return Err(Error::Forbidden { permission: "a device".into() });
         };
+        let targets = self.targets(None);
         let signed = self.write(|s| s.list.as_mut().ok_or(Error::Conflict("not in a mesh".into()))?.append(key, op))?;
         self.prune();
         self.save().await?;
         self.changed();
-        self.spread(vec![signed.clone()], None);
+        self.spread(vec![signed.clone()], targets);
         Ok(signed)
     }
 
@@ -442,20 +458,26 @@ impl Node {
             return Err(Error::Forbidden { permission: "a device".into() });
         };
         let mesh = self.mesh().ok_or(Error::Conflict("not in a mesh".into()))?;
-        Note::issue(
-            key,
-            NoteBody {
-                mesh,
-                device: key.public(),
-                app,
-                name: crate::check_name(name)?,
-                service: service.to_string(),
-                grants,
-                serves,
-                program,
-                at: crate::now(),
-            },
-        )
+        let mut body = NoteBody {
+            mesh,
+            device: key.public(),
+            app,
+            name: crate::check_name(name)?,
+            service: service.to_string(),
+            grants,
+            serves,
+            program,
+            at: crate::now(),
+        };
+        // The same approval signed within the second a revoked one was is the revoked one; a
+        // later second makes it a note of its own.
+        loop {
+            let note = Note::issue(key, body.clone())?;
+            if !self.read(|s| s.list.as_ref().is_some_and(|l| l.is_revoked(&note.id))) {
+                return Ok(note);
+            }
+            body.at += 1;
+        }
     }
 
     /// This node's own presence, now.
@@ -475,13 +497,8 @@ impl Node {
 
     /// Dial `id` for `alpn`, having synced with it lately enough that it knows who is calling.
     pub async fn connect(&self, id: EndpointId, alpn: &[u8]) -> Result<Connection> {
-        let fresh = self
-            .inner
-            .synced
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&id)
-            .is_some_and(|t| t.elapsed() < FRESH);
+        let fresh =
+            self.inner.synced.lock().unwrap_or_else(|e| e.into_inner()).get(&id).is_some_and(|t| t.elapsed() < FRESH);
         if !fresh {
             self.sync_with(id).await?;
         }
@@ -492,19 +509,29 @@ impl Node {
     }
 
     /// Sync with one participant.
-    pub async fn sync_with(&self, id: EndpointId) -> Result<()> {
+    pub fn sync_with(&self, id: EndpointId) -> BoxFuture<Result<()>> {
+        let node = self.clone();
+        Box::pin(async move { node.sync_once(id).await })
+    }
+
+    async fn sync_once(&self, id: EndpointId) -> Result<()> {
         let Some((mesh, heads)) = self.read(|s| s.list.as_ref().map(|l| (l.mesh(), l.heads().to_vec()))) else {
             return Err(Error::Conflict("not in a mesh".into()));
         };
         let first = !self.inner.synced.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&id);
-        let entries = if first { self.read(|s| s.list.as_ref().map(DeviceList::entries).unwrap_or_default()) } else { Vec::new() };
+        let entries = if first {
+            self.read(|s| s.list.as_ref().map(DeviceList::entries).unwrap_or_default())
+        } else {
+            Vec::new()
+        };
         let me = self.presence().await;
         let request = Request::Sync { mesh, me, heads: heads.clone(), entries, directory: self.directory() };
         let synced: Synced = self.ask(id, &request).await?;
         if synced.me.id != id {
             return Err(Error::Unreachable("the participant answered as someone else".into()));
         }
-        let fresh = self.take(synced.entries, vec![synced.me].into_iter().chain(synced.directory).collect(), Some(id)).await?;
+        let fresh =
+            self.take(synced.entries, vec![synced.me].into_iter().chain(synced.directory).collect(), Some(id)).await?;
         let mine = self.read(|s| s.list.as_ref().map(|l| l.heads().to_vec()).unwrap_or_default());
         if mine != synced.heads {
             let entries = self.read(|s| s.list.as_ref().map(DeviceList::entries).unwrap_or_default());
@@ -517,17 +544,58 @@ impl Node {
     }
 
     /// Sync with everyone this node knows of, at once.
+    ///
+    /// Whoever cannot be reached is tried again after each of [`RETRY`], without waiting for it.
     pub async fn sync_all(&self) {
-        let everyone = self.everyone();
-        n0_future::join_all(everyone.into_iter().map(|id| {
+        let missed = self.sync_these(self.everyone()).await;
+        if missed.is_empty() {
+            return;
+        }
+        let node = self.clone();
+        n0_future::task::spawn(async move {
+            let mut missed = missed;
+            for wait in RETRY {
+                n0_future::time::sleep(wait).await;
+                let still = node.everyone();
+                missed = node.sync_these(missed.into_iter().filter(|id| still.contains(id)).collect()).await;
+                if missed.is_empty() {
+                    return;
+                }
+            }
+        });
+    }
+
+    /// Sync with each of `ids` at once; returns the ones that could not be reached.
+    async fn sync_these(&self, ids: Vec<EndpointId>) -> Vec<EndpointId> {
+        n0_future::join_all(ids.into_iter().map(|id| {
             let node = self.clone();
             async move {
-                if let Err(e) = node.sync_with(id).await {
-                    tracing::debug!(peer = %id.fmt_short(), error = %e, "sync");
+                match node.sync_with(id).await {
+                    Ok(()) => None,
+                    Err(e) => {
+                        tracing::debug!(peer = %id.fmt_short(), error = %e, "sync");
+                        matches!(e, Error::Unreachable(_)).then_some(id)
+                    }
                 }
             }
         }))
-        .await;
+        .await
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
+    /// Whether this node's endpoint has closed, by [`Node::shutdown`] or by itself. A node
+    /// whose endpoint closed reaches no one and hears from no one again; its host starts over.
+    pub fn is_closed(&self) -> bool {
+        self.inner.ep.is_closed()
+    }
+
+    /// Wait until this node's endpoint closes. An endpoint closes by itself when its sockets
+    /// fail for good — after a network change it could not rebind to — and the host's only way
+    /// on is to start again with a new endpoint.
+    pub async fn closed(&self) {
+        self.inner.ep.closed().await
     }
 
     pub async fn shutdown(&self) {
@@ -550,6 +618,7 @@ impl Node {
     }
 
     async fn save(&self) -> Result<()> {
+        let _saving = self.inner.saving.lock().await;
         let saved = self.read(|s| Saved {
             entries: s.list.as_ref().map(DeviceList::entries).unwrap_or_default(),
             directory: s.directory.values().cloned().collect(),
@@ -590,11 +659,15 @@ impl Node {
 
     async fn ask<A: serde::de::DeserializeOwned>(&self, id: EndpointId, request: &Request) -> Result<A> {
         let conn = self.connection(id).await?;
-        match crate::wire::ask(&conn, request).await {
+        // A connection to a participant that restarted looks alive until QUIC gives up on it;
+        // one that does not answer in time is dropped and dialed afresh.
+        match within(ASK_TIMEOUT, crate::wire::ask(&conn, request)).await {
             Err(Error::Unreachable(_)) => {
-                self.inner.conns.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+                if let Some(stale) = self.inner.conns.lock().unwrap_or_else(|e| e.into_inner()).remove(&id) {
+                    stale.close(0u32.into(), b"stale");
+                }
                 let conn = self.connection(id).await?;
-                crate::wire::ask(&conn, request).await
+                within(ASK_TIMEOUT, crate::wire::ask(&conn, request)).await
             }
             other => other,
         }
@@ -602,13 +675,23 @@ impl Node {
 
     /// Take in entries and presences from `from`; returns the entries new to this node, which
     /// it has sent on to everyone else.
-    async fn take(&self, entries: Vec<Signed>, presences: Vec<Presence>, from: Option<EndpointId>) -> Result<Vec<EntryId>> {
-        let fresh = self.write(|s| s.list.as_mut().map(|l| l.merge(entries)).unwrap_or_default());
+    async fn take(
+        &self,
+        entries: Vec<Signed>,
+        presences: Vec<Presence>,
+        from: Option<EndpointId>,
+    ) -> Result<Vec<EntryId>> {
+        // Whoever counts before these entries are taken hears of them, the ones they cut off included.
+        let targets = self.targets(from);
+        let (fresh, waiting) = self.write(|s| match s.list.as_mut() {
+            Some(list) => (list.merge(entries), list.waiting()),
+            None => (Vec::new(), 0),
+        });
         let learned = self.learn(presences);
         if !fresh.is_empty() {
             self.prune();
         }
-        if !fresh.is_empty() || learned {
+        if !fresh.is_empty() || !learned.is_empty() {
             self.save().await?;
             self.changed();
         }
@@ -617,30 +700,56 @@ impl Node {
                 let list = s.list.as_ref().expect("entries merged into a list");
                 list.entries().into_iter().filter(|e| fresh.iter().any(|id| list_id(e) == *id)).collect()
             });
-            self.spread(spread, from);
+            self.spread(spread, targets);
+        }
+        // Entries that arrived before their parents wait; the sender has the parents.
+        if waiting > 0
+            && let Some(from) = from
+        {
+            let node = self.clone();
+            n0_future::task::spawn(async move {
+                if let Err(e) = node.sync_with(from).await {
+                    tracing::debug!(peer = %from.fmt_short(), error = %e, "fetching missing parents");
+                }
+            });
+        }
+        // Everyone else hears of a newcomer at once, and the newcomer, heard of second-hand,
+        // learns of this node now rather than at its next announce.
+        let newcomers: Vec<Presence> =
+            self.read(|s| learned.iter().filter_map(|id| s.directory.get(id).cloned()).collect());
+        self.spread_presences(newcomers, self.targets(from));
+        for id in learned.into_iter().filter(|id| Some(*id) != from) {
+            let node = self.clone();
+            n0_future::task::spawn(async move {
+                if let Err(e) = node.sync_with(id).await {
+                    tracing::debug!(peer = %id.fmt_short(), error = %e, "introducing");
+                }
+            });
         }
         Ok(fresh)
     }
 
-    /// Record the presences that check out against the list, keeping the newest of each.
-    fn learn(&self, presences: Vec<Presence>) -> bool {
+    /// Record the presences that check out against the list, keeping the newest of each; returns
+    /// the participants this node had not known of.
+    fn learn(&self, presences: Vec<Presence>) -> Vec<EndpointId> {
         let me = self.id();
-        let mut learned = false;
+        let mut new = Vec::new();
         self.write(|s| {
             let Some(list) = &s.list else { return };
             for presence in presences {
                 if presence.id == me || presence.check(list).is_err() {
                     continue;
                 }
-                if s.directory.get(&presence.id).is_some_and(|known| known.at >= presence.at) {
-                    continue;
+                match s.directory.get(&presence.id) {
+                    Some(known) if known.at > presence.at || *known == presence => continue,
+                    Some(_) => {}
+                    None => new.push(presence.id),
                 }
                 self.inner.lookup.set_endpoint_info(presence.endpoint_addr());
                 s.directory.insert(presence.id, presence);
-                learned = true;
             }
         });
-        learned
+        new
     }
 
     /// Forget whoever stopped counting, and hang up on them.
@@ -664,27 +773,71 @@ impl Node {
         }
     }
 
-    /// Send entries to everyone but `from`, without waiting.
-    fn spread(&self, entries: Vec<Signed>, from: Option<EndpointId>) {
+    /// Everyone but `from`, with where to reach them, as things stand.
+    fn targets(&self, from: Option<EndpointId>) -> Vec<iroh::EndpointAddr> {
+        self.everyone().into_iter().filter(|id| Some(*id) != from).map(|id| self.addr_of(id)).collect()
+    }
+
+    /// Send entries to `targets`, without waiting.
+    fn spread(&self, entries: Vec<Signed>, targets: Vec<iroh::EndpointAddr>) {
         let Some(mesh) = self.mesh() else { return };
-        let targets: Vec<EndpointId> = self.everyone().into_iter().filter(|id| Some(*id) != from).collect();
         if targets.is_empty() || entries.is_empty() {
             return;
         }
         let node = self.clone();
         n0_future::task::spawn(async move {
             let request = Request::Push { mesh, entries, directory: Vec::new() };
-            n0_future::join_all(targets.into_iter().map(|id| {
+            n0_future::join_all(targets.into_iter().map(|addr| {
                 let node = node.clone();
                 let request = request.clone();
                 async move {
-                    if let Err(e) = node.ask::<serde_json::Value>(id, &request).await {
+                    let id = addr.id;
+                    let counts = node.everyone().contains(&id);
+                    let pushed = if counts {
+                        node.ask::<serde_json::Value>(id, &request).await
+                    } else {
+                        // Cut off by these very entries: told once, on a connection of its own.
+                        node.ask_once(addr, &request).await
+                    };
+                    if let Err(e) = pushed {
                         tracing::debug!(peer = %id.fmt_short(), error = %e, "push");
                     }
                 }
             }))
             .await;
         });
+    }
+
+    /// Send presences to `targets`, without waiting.
+    fn spread_presences(&self, presences: Vec<Presence>, targets: Vec<iroh::EndpointAddr>) {
+        let Some(mesh) = self.mesh() else { return };
+        if targets.is_empty() || presences.is_empty() {
+            return;
+        }
+        let node = self.clone();
+        n0_future::task::spawn(async move {
+            let request = Request::Push { mesh, entries: Vec::new(), directory: presences };
+            n0_future::join_all(targets.into_iter().map(|addr| {
+                let node = node.clone();
+                let request = request.clone();
+                async move {
+                    if let Err(e) = node.ask::<serde_json::Value>(addr.id, &request).await {
+                        tracing::debug!(peer = %addr.id.fmt_short(), error = %e, "telling of a newcomer");
+                    }
+                }
+            }))
+            .await;
+        });
+    }
+
+    async fn ask_once<A: serde::de::DeserializeOwned>(&self, addr: iroh::EndpointAddr, request: &Request) -> Result<A> {
+        let conn = n0_future::time::timeout(crate::net::CONNECT_TIMEOUT, self.inner.ep.connect(addr, ALPN))
+            .await
+            .map_err(|_| Error::Unreachable("the participant did not answer in time".into()))?
+            .map_err(|e| Error::Unreachable(format!("could not reach the participant: {e}")))?;
+        let answer = crate::wire::ask(&conn, request).await;
+        conn.close(0u32.into(), b"done");
+        answer
     }
 
     /// Sync with everyone now, every [`ANNOUNCE`], and whenever this endpoint's address changes.
@@ -717,7 +870,16 @@ impl Node {
                 if me.id != remote {
                     return Err(Error::Unauthorized);
                 }
-                self.read(|s| me.check(s.list.as_ref().expect("in a mesh")))?;
+                self.read(|s| {
+                    let list = s.list.as_ref().expect("in a mesh");
+                    if list.state().removed.contains(&remote) {
+                        return Err(Error::Forbidden { permission: "a device that has not been removed".into() });
+                    }
+                    if me.note().is_some_and(|n| list.is_revoked(&n.id)) {
+                        return Err(Error::Forbidden { permission: "an approval that has not been revoked".into() });
+                    }
+                    me.check(list)
+                })?;
                 self.take(Vec::new(), std::iter::once(me).chain(directory).collect(), Some(remote)).await?;
                 let (mine, all) = self.read(|s| {
                     let list = s.list.as_ref().expect("in a mesh");
@@ -729,7 +891,11 @@ impl Node {
                     heads: mine,
                     directory: self.directory().into_iter().filter(|p| p.id != remote).collect(),
                 };
-                self.inner.synced.lock().unwrap_or_else(|e| e.into_inner()).insert(remote, n0_future::time::Instant::now());
+                self.inner
+                    .synced
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(remote, n0_future::time::Instant::now());
                 serde_json::to_value(reply).map_err(|e| Error::Internal(e.to_string()))
             }
             Request::Push { mesh: theirs, entries, directory } => {
@@ -747,6 +913,15 @@ impl Node {
             }
         }
     }
+}
+
+/// How long a participant has to answer one request on a connection that is already open.
+pub const ASK_TIMEOUT: Duration = Duration::from_secs(10);
+
+async fn within<T>(limit: Duration, asked: impl std::future::Future<Output = Result<T>>) -> Result<T> {
+    n0_future::time::timeout(limit, asked)
+        .await
+        .map_err(|_| Error::Unreachable("the participant did not answer in time".into()))?
 }
 
 fn list_id(signed: &Signed) -> EntryId {

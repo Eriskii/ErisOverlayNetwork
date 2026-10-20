@@ -43,6 +43,8 @@ pub mod prompt;
 #[cfg(feature = "native")]
 pub mod qr;
 pub mod signed;
+#[cfg(all(feature = "native", unix))]
+pub mod sys;
 pub mod ticket;
 pub mod token;
 pub mod wire;

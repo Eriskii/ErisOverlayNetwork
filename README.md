@@ -4,7 +4,7 @@ The Eris mesh: one signed list of your devices, approvals for the apps on them, 
 between them, over [Iroh](https://iroh.computer). Crate `erisoverlaynetwork`.
 
 ```toml
-erisoverlaynetwork = { git = "https://github.com/Eriskii/ErisOverlayNetwork", tag = "v0.1.0" }
+erisoverlaynetwork = { git = "https://github.com/Eriskii/ErisOverlayNetwork", tag = "v0.2.0" }
 ```
 
 A person's devices form one mesh. Each device runs ErisAuth, which holds the device's key. You add a
@@ -24,7 +24,6 @@ the list already held signed it.
 | remove   | Devices leave, for good. A removed key never counts again.                     |
 | name     | A device is called something new.                                              |
 | revoke   | An app's note stops counting.                                                  |
-| pin      | One app provides a service to the whole mesh: the mesh's ErisDB.               |
 
 Each entry names the entries its author had seen, so the entries form a graph that every copy
 orders the same way, and the same entries always mean the same members:
@@ -44,9 +43,9 @@ permission patterns, segment by segment, with `*` matching one segment or, last,
 `files:read`, `tasks:*`, `*`.
 
 An app on a device with ErisAuth asks it over the [agent](src/agent.rs) socket,
-`$XDG_RUNTIME_DIR/erisauth/agent.sock`, and gets its note and a snapshot of the mesh back. An app
-with no ErisAuth beside it, such as one in a browser, asks a device by ticket instead, through the
-same ceremony a device joins by.
+`erisauth/agent.sock` in the session's runtime directory (`$XDG_RUNTIME_DIR`, or `$TMPDIR` on
+macOS), and gets its note and a snapshot of the mesh back. An app with no ErisAuth beside it, such
+as one in a browser, asks a device by ticket instead, through the same ceremony a device joins by.
 
 ## The node
 
@@ -62,8 +61,8 @@ under `eris-mesh/0`. A node:
 
 A service lets a caller in with `Node::authorize(caller, service, required)`, which checks the
 caller's note against the list, and watches `Node::subscribe()` to drop whatever stops counting.
-`Node::providers(service)` finds the apps serving a service; `Node::pinned(service)` finds the one
-pinned to it.
+`Node::providers(service)` finds the apps serving a service. For a service a mesh has one of, such as
+ErisDB, `Node::provider(service)` gives the one most recently approved.
 
 ```rust
 use erisoverlaynetwork::mesh::{self, Config, FileStore, Local, Node};
@@ -98,7 +97,8 @@ with a snapshot of the mesh.
 
 ## Also here
 
-`token` seals and opens HMAC-signed tokens; `permission` matches, encloses and intersects grants;
+`sys` finds the session's runtime directory, the machine's name, the program a process runs, and opens
+links, the same way on Linux and macOS; `token` seals and opens HMAC-signed tokens; `permission` matches, encloses and intersects grants;
 `key` derives or stores an Iroh key; `qr` renders tickets; `prompt` puts a request to a person at a
 terminal.
 

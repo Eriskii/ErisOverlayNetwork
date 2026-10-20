@@ -1,6 +1,7 @@
 //! Asking the device's ErisAuth to approve an app.
 //!
-//! ErisAuth listens on `$XDG_RUNTIME_DIR/erisauth/agent.sock`. An app connects and sends one
+//! ErisAuth listens on `erisauth/agent.sock` in the session's runtime directory:
+//! `$XDG_RUNTIME_DIR`, or on macOS `$TMPDIR`. An app connects and sends one
 //! line: approve me, by this key, for this service, with these grants. ErisAuth puts the
 //! request to the person, with the program the kernel says is asking, and answers with the
 //! app's [note](crate::note) and a [snapshot](crate::directory::Snapshot) of the mesh, or a
@@ -83,9 +84,10 @@ pub fn socket_in(runtime_dir: &Path) -> PathBuf {
     runtime_dir.join("erisauth").join("agent.sock")
 }
 
-/// Where this user's agent listens, when the session has a runtime directory.
+/// Where this user's agent listens, when the session has a runtime directory
+/// ([`crate::sys::runtime_dir`]).
 pub fn socket_path() -> Option<PathBuf> {
-    std::env::var_os("XDG_RUNTIME_DIR").filter(|dir| !dir.is_empty()).map(|dir| socket_in(Path::new(&dir)))
+    crate::sys::runtime_dir().map(|dir| socket_in(&dir))
 }
 
 /// Connect to this user's agent; `None` when there is none.

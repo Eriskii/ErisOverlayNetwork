@@ -94,3 +94,14 @@ fn what_is_asked_is_checked() {
     let bad = Ask::App { name: "Notes".into(), service: "notes".into(), grants: vec!["NOPE".into()], serves: false };
     assert!(pairings.redeem(&code, bad, phone()).is_err());
 }
+
+#[test]
+fn only_the_redeemer_withdraws() {
+    let pairings = Pairings::new();
+    let me = phone();
+    let (id, code) = pairings.open(600);
+    pairings.redeem(&code, ask(), me).unwrap();
+    assert!(matches!(pairings.withdraw(&code, &phone()), Err(Error::Unauthorized)));
+    pairings.withdraw(&code, &me).unwrap();
+    assert!(pairings.get(id).is_none());
+}

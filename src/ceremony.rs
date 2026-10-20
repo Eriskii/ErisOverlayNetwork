@@ -19,6 +19,9 @@ use crate::ticket::Ticket;
 /// The ceremony's ALPN.
 pub const ALPN: &[u8] = b"eris-pair/0";
 
+/// How long dialing the device may take.
+pub const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// How often a newcomer asks for its answer.
 pub const POLL: std::time::Duration = std::time::Duration::from_millis(500);
 
@@ -74,8 +77,17 @@ pub enum Approval {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
-    Redeem { code: String, ask: Ask },
-    Collect { code: String },
+    Redeem {
+        code: String,
+        ask: Ask,
+    },
+    Collect {
+        code: String,
+    },
+    /// The redeemer takes its request back.
+    Withdraw {
+        code: String,
+    },
 }
 
 /// A device's answer to a redemption.
@@ -113,12 +125,10 @@ pub async fn redeem(endpoint: &iroh::Endpoint, ticket: &Ticket, ask: Ask) -> Res
     if ticket.eid == endpoint.id() {
         return Err(Error::BadRequest("this is this device's own ticket".into()));
     }
-    let session = code_session(&ticket.token).ok_or_else(|| Error::BadRequest("the ticket's code is damaged".into()))?;
+    let session =
+        code_session(&ticket.token).ok_or_else(|| Error::BadRequest("the ticket's code is damaged".into()))?;
     let fingerprint = crate::pairing::fingerprint(&session, &endpoint.id(), &ask);
-    let conn = endpoint
-        .connect(ticket.endpoint_addr(), ALPN)
-        .await
-        .map_err(|e| Error::Unreachable(format!("could not reach the device: {e}")))?;
+    let conn = dial(endpoint, ticket).await?;
     let redeemed: Redeemed =
         crate::wire::ask(&conn, &Request::Redeem { code: ticket.token.clone(), ask: ask.clone() }).await?;
     if redeemed.fingerprint != fingerprint {
@@ -134,16 +144,45 @@ pub async fn redeem(endpoint: &iroh::Endpoint, ticket: &Ticket, ask: Ask) -> Res
     })
 }
 
+/// Take up again a redemption this endpoint made earlier — from a page that has since gone
+/// away — to collect its answer or withdraw it. Only the key that redeemed can collect, so
+/// this works for nobody else; `host` is the device's name, as the redemption gave it.
+pub fn resume(endpoint: &iroh::Endpoint, ticket: &Ticket, ask: Ask, host: String) -> Result<Joining> {
+    ask.check()?;
+    let session =
+        code_session(&ticket.token).ok_or_else(|| Error::BadRequest("the ticket's code is damaged".into()))?;
+    let fingerprint = crate::pairing::fingerprint(&session, &endpoint.id(), &ask);
+    Ok(Joining {
+        endpoint: endpoint.clone(),
+        ticket: ticket.clone(),
+        ask,
+        conn: std::sync::Mutex::new(None),
+        fingerprint,
+        host,
+    })
+}
+
+async fn dial(endpoint: &iroh::Endpoint, ticket: &Ticket) -> Result<iroh::endpoint::Connection> {
+    n0_future::time::timeout(CONNECT_TIMEOUT, endpoint.connect(ticket.endpoint_addr(), ALPN))
+        .await
+        .map_err(|_| Error::Unreachable("the device did not answer in time".into()))?
+        .map_err(|e| Error::Unreachable(format!("could not reach the device: {e}")))
+}
+
 impl Joining {
+    /// Take the request back: the device forgets it.
+    pub async fn withdraw(&self) -> Result<()> {
+        let conn = self.connection().await?;
+        let _: serde_json::Value =
+            crate::wire::ask(&conn, &Request::Withdraw { code: self.ticket.token.clone() }).await?;
+        Ok(())
+    }
+
     async fn connection(&self) -> Result<iroh::endpoint::Connection> {
         if let Some(conn) = self.conn.lock().unwrap_or_else(|e| e.into_inner()).clone() {
             return Ok(conn);
         }
-        let conn = self
-            .endpoint
-            .connect(self.ticket.endpoint_addr(), ALPN)
-            .await
-            .map_err(|e| Error::Unreachable(format!("could not reach the device: {e}")))?;
+        let conn = dial(&self.endpoint, &self.ticket).await?;
         *self.conn.lock().unwrap_or_else(|e| e.into_inner()) = Some(conn.clone());
         Ok(conn)
     }
@@ -263,6 +302,9 @@ mod service {
                             }
                             Err(e) => Err(e),
                         },
+                        Ok(Request::Withdraw { code }) => {
+                            this.pairings.withdraw(&code, &remote).map(|()| serde_json::Value::Null)
+                        }
                         Ok(Request::Collect { code }) => this.pairings.collect(&code, &remote).and_then(|c| {
                             serde_json::to_value(match c {
                                 Collected::Waiting => Reply::Waiting,

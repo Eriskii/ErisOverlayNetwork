@@ -210,6 +210,20 @@ impl Pairings {
         Ok(out)
     }
 
+    /// The redeemer takes its request back; the session is gone.
+    pub fn withdraw(&self, code: &str, identity: &iroh::EndpointId) -> Result<()> {
+        let mut sessions = self.all();
+        let slot = Self::by_code(&mut sessions, code)?;
+        if slot.session.identity.as_ref() != Some(identity) {
+            return Err(Error::Unauthorized);
+        }
+        let id = slot.session.id;
+        sessions.remove(&id);
+        drop(sessions);
+        self.changed();
+        Ok(())
+    }
+
     /// The redeemer asks for its answer. Only the key that redeemed the code may ask once it
     /// has; an approved answer repeats safely.
     pub fn collect(&self, code: &str, identity: &iroh::EndpointId) -> Result<Collected> {

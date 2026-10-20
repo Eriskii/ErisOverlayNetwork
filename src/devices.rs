@@ -7,9 +7,7 @@
 //! - **add** a device, under a name;
 //! - **remove** devices, for good: a removed key never counts again;
 //! - **name** a device anew;
-//! - **revoke** an app's [note](crate::note);
-//! - **pin** the one app that provides a service to the whole mesh, by its note — the mesh's
-//!   ErisDB. A pin lasts until another replaces it, and counts only while its note does.
+//! - **revoke** an app's [note](crate::note).
 //!
 //! Any member device may write any of them. What a set of entries means is decided by these
 //! rules alone, so every participant holding the same entries agrees on the same members:
@@ -42,6 +40,9 @@ pub const ENTRY_DOMAIN: &str = "eris-mesh/entry/0";
 /// The most entries one list holds.
 pub const MAX_ENTRIES: usize = 10_000;
 
+/// The most entries one list holds while their parents have not arrived.
+pub const MAX_WAITING: usize = 1_000;
+
 /// The most devices one removal names.
 pub const MAX_REMOVED: usize = 64;
 
@@ -59,12 +60,23 @@ digest_id!(
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Op {
     /// The mesh begins; its author is its first device.
-    Genesis { name: String },
-    Add { device: DeviceId, name: String },
-    Remove { devices: Vec<DeviceId> },
-    Name { device: DeviceId, name: String },
-    Revoke { note: NoteId },
-    Pin { service: String, app: crate::note::AppId, note: NoteId },
+    Genesis {
+        name: String,
+    },
+    Add {
+        device: DeviceId,
+        name: String,
+    },
+    Remove {
+        devices: Vec<DeviceId>,
+    },
+    Name {
+        device: DeviceId,
+        name: String,
+    },
+    Revoke {
+        note: NoteId,
+    },
 }
 
 /// What an entry's author signed.
@@ -122,7 +134,6 @@ impl Entry {
                             return Err(Error::BadRequest(format!("a removal names 1 to {MAX_REMOVED} devices")));
                         }
                     }
-                    Op::Pin { service, .. } => crate::note::check_service(service)?,
                     Op::Revoke { .. } | Op::Genesis { .. } => {}
                 }
             }
@@ -144,15 +155,6 @@ pub struct Member {
     pub added_at: i64,
 }
 
-/// The app pinned to provide a service.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Pinned {
-    pub app: crate::note::AppId,
-    pub note: NoteId,
-    /// The device that pinned it.
-    pub by: DeviceId,
-}
-
 /// What the entries mean together.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct State {
@@ -160,8 +162,6 @@ pub struct State {
     /// Every device ever removed. None of them counts again.
     pub removed: BTreeSet<DeviceId>,
     pub revoked: BTreeSet<NoteId>,
-    /// The app each pinned service is provided by, and the note that approves it.
-    pub pinned: BTreeMap<String, Pinned>,
     /// The entries nothing has named as a parent yet, sorted.
     pub heads: Vec<EntryId>,
 }
@@ -172,6 +172,8 @@ pub struct DeviceList {
     mesh: MeshId,
     founder: DeviceId,
     entries: HashMap<EntryId, Entry>,
+    /// Entries whose parents have not arrived yet. They count for nothing until they do.
+    waiting: HashMap<EntryId, Entry>,
     /// Every entry, parents before children, ties broken by id.
     order: Vec<EntryId>,
     state: State,
@@ -180,7 +182,12 @@ pub struct DeviceList {
 impl DeviceList {
     /// Make a new mesh with `key` as its first device.
     pub fn create(key: &SecretKey, name: &str) -> Result<(Self, Signed)> {
-        let body = Body { mesh: None, parents: Vec::new(), at: crate::now(), op: Op::Genesis { name: crate::check_name(name)? } };
+        let body = Body {
+            mesh: None,
+            parents: Vec::new(),
+            at: crate::now(),
+            op: Op::Genesis { name: crate::check_name(name)? },
+        };
         let signed = Signed::sign(key, ENTRY_DOMAIN, &body)?;
         let list = Self::from_entries([signed.clone()])?;
         Ok((list, signed))
@@ -198,6 +205,7 @@ impl DeviceList {
             mesh: MeshId(genesis.id.0),
             founder: genesis.author,
             entries: HashMap::new(),
+            waiting: HashMap::new(),
             order: Vec::new(),
             state: State::default(),
         };
@@ -210,8 +218,8 @@ impl DeviceList {
     /// Add whatever of `entries` this list lacks and can place; returns the ids it took.
     ///
     /// An entry that does not verify, belongs to another mesh, or could never count is
-    /// dropped, as is one whose parents are nowhere to be found. Everyone holding the same
-    /// entries drops the same ones.
+    /// dropped; everyone holding the same entries drops the same ones. One whose parents have
+    /// not arrived waits for them, counting for nothing until they do; see [`DeviceList::waiting`].
     pub fn merge(&mut self, entries: impl IntoIterator<Item = Signed>) -> Vec<EntryId> {
         let opened: Vec<Entry> = entries
             .into_iter()
@@ -229,6 +237,7 @@ impl DeviceList {
     fn insert(&mut self, entries: impl Iterator<Item = Entry>) -> Vec<EntryId> {
         let mut waiting: Vec<Entry> = entries
             .filter(|e| !self.entries.contains_key(&e.id) && e.body.mesh == Some(self.mesh))
+            .chain(std::mem::take(&mut self.waiting).into_values())
             .collect();
         let mut taken = Vec::new();
         loop {
@@ -248,6 +257,9 @@ impl DeviceList {
             if waiting.is_empty() || waiting.len() == before {
                 break;
             }
+        }
+        for entry in waiting.into_iter().take(MAX_WAITING) {
+            self.waiting.insert(entry.id, entry);
         }
         if !taken.is_empty() || self.order.is_empty() {
             let dropped = self.recompute();
@@ -277,7 +289,6 @@ impl DeviceList {
                     return Err(Error::BadRequest("only a device in the mesh can be named".into()));
                 }
             }
-            Op::Pin { service, .. } => crate::note::check_service(service)?,
             Op::Remove { .. } | Op::Revoke { .. } => {}
         }
         let body = Body { mesh: Some(self.mesh), parents: self.state.heads.clone(), at: crate::now(), op };
@@ -318,12 +329,6 @@ impl DeviceList {
         self.state.revoked.contains(note)
     }
 
-    /// The app pinned to provide `service`, while its note has not been revoked. Whether its
-    /// device is still a member is the note's to say; see [`crate::note::Note::check`].
-    pub fn pinned(&self, service: &str) -> Option<&Pinned> {
-        self.state.pinned.get(service)
-    }
-
     /// The members `device` added.
     pub fn added_by(&self, device: &DeviceId) -> Vec<DeviceId> {
         self.state.members.iter().filter(|(_, m)| m.added_by.as_ref() == Some(device)).map(|(d, _)| *d).collect()
@@ -337,6 +342,11 @@ impl DeviceList {
         self.entries.is_empty()
     }
 
+    /// How many entries are waiting for parents this list has not seen.
+    pub fn waiting(&self) -> usize {
+        self.waiting.len()
+    }
+
     pub fn contains(&self, id: &EntryId) -> bool {
         self.entries.contains_key(id)
     }
@@ -348,6 +358,7 @@ impl DeviceList {
 
     /// Order the entries, work out which count, and drop the ones that never can. Returns the
     /// ids dropped.
+    #[allow(clippy::needless_range_loop)]
     fn recompute(&mut self) -> Vec<EntryId> {
         let order = topological(&self.entries);
         let index: HashMap<EntryId, usize> = order.iter().enumerate().map(|(i, id)| (*id, i)).collect();
@@ -412,7 +423,9 @@ impl DeviceList {
             }
             match &entry.body.op {
                 Op::Genesis { name } => {
-                    state.members.insert(entry.author, Member { name: name.clone(), added_by: None, added_at: entry.body.at });
+                    state
+                        .members
+                        .insert(entry.author, Member { name: name.clone(), added_by: None, added_at: entry.body.at });
                 }
                 Op::Add { device, name } => {
                     state.members.entry(*device).or_insert(Member {
@@ -430,13 +443,9 @@ impl DeviceList {
                 Op::Revoke { note } => {
                     state.revoked.insert(*note);
                 }
-                Op::Pin { service, app, note } => {
-                    state.pinned.insert(service.clone(), Pinned { app: *app, note: *note, by: entry.author });
-                }
             }
         }
         state.members.retain(|device, _| !state.removed.contains(device));
-        state.pinned.retain(|_, pin| !state.revoked.contains(&pin.note));
 
         // An entry whose author was never a member, as its own parents show, can never count.
         let dropped: Vec<EntryId> = (0..n).filter(|&i| !raw[i]).map(|i| order[i]).collect();

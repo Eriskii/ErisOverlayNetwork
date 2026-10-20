@@ -1,6 +1,6 @@
 [package]
 name = "erisoverlaynetwork"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "The Eris mesh: one signed list of your devices, approvals for the apps on them, and the connections between them, over Iroh"
 license = "MIT"
@@ -31,6 +31,7 @@ base64 = "0.22"
 hmac = "0.12"
 iroh = { version = "1", default-features = false }
 iroh-mdns-address-lookup = { version = "0.6", optional = true }
+libc = "0.2"
 n0-future = "0.3"
 png = { version = "0.18.1", optional = true }
 qrcode = { version = "0.14.1", default-features = false, features = ["svg"], optional = true }
@@ -49,3 +50,8 @@ rqrr = "0.10.1"
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# In a browser, randomness comes from the Web Crypto API.
+[target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
+uuid = { version = "1", features = ["v4", "serde", "js"] }

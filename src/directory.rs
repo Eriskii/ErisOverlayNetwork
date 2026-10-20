@@ -89,14 +89,10 @@ impl Snapshot {
         Ok(list)
     }
 
-    /// The app pinned to provide `service`, with its presence, when this snapshot knows where
-    /// it is and its note still counts.
-    pub fn pinned(&self, service: &str) -> Option<&Presence> {
-        let list = self.list().ok()?;
-        let pin = *list.pinned(service)?;
-        self.directory
-            .iter()
-            .find(|p| p.id == pin.app && p.note().is_some_and(|n| n.id == pin.note) && p.check(&list).is_ok())
+    /// The one app providing `service`, for a service a mesh has one of, such as ErisDB: of
+    /// the apps approved to serve it, the most recently approved.
+    pub fn provider(&self, service: &str) -> Option<&Presence> {
+        self.providers(service).into_iter().max_by_key(|p| p.note().map(|n| (n.body.at, n.id)))
     }
 
     /// The participants serving `service`, as far as this snapshot knows.
