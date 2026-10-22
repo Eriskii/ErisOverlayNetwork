@@ -1,110 +1,18 @@
 //! Real participants on loopback Iroh endpoints: devices that join one another by ticket,
 //! apps under notes, and what happens when a device leaves.
 
+mod support;
+
 use std::sync::Arc;
 use std::time::Duration;
 
-use erisoverlaynetwork::ceremony::{self, Approval, Ask, PairService};
+use erisoverlaynetwork::Error;
+use erisoverlaynetwork::ceremony::{self, Approval, Ask};
 use erisoverlaynetwork::devices::Op;
-use erisoverlaynetwork::mesh::{self, Config, FileStore, Local, MemoryStore, Node};
+use erisoverlaynetwork::mesh::{self, Config, FileStore, Local, Node};
 use erisoverlaynetwork::net::{self, Network};
-use erisoverlaynetwork::pairing::Pairings;
-use erisoverlaynetwork::ticket::Ticket;
-use erisoverlaynetwork::{Error, Note};
 use iroh::SecretKey;
-use iroh::protocol::Router;
-
-struct Device {
-    name: String,
-    node: Node,
-    pairings: Arc<Pairings>,
-    _router: Router,
-}
-
-struct App {
-    node: Node,
-    note: Note,
-    _router: Router,
-}
-
-async fn device(name: &str) -> Device {
-    device_with(name, Arc::new(MemoryStore::default())).await
-}
-
-async fn device_with(name: &str, store: Arc<dyn mesh::Store>) -> Device {
-    let key = SecretKey::generate();
-    let endpoint = net::endpoint(key.clone(), &Network::Loopback).await.unwrap();
-    let node = Node::start(Config {
-        endpoint: endpoint.clone(),
-        network: Network::Loopback,
-        local: Local::Device(key),
-        store,
-    })
-    .await
-    .unwrap();
-    let pairings = Arc::new(Pairings::new());
-    let shown = name.to_string();
-    let router = Router::builder(endpoint)
-        .accept(mesh::ALPN, node.protocol())
-        .accept(ceremony::ALPN, PairService::new(pairings.clone(), move || shown.clone()))
-        .spawn();
-    Device { name: name.into(), node, pairings, _router: router }
-}
-
-async fn ticket(host: &Device) -> (uuid::Uuid, Ticket) {
-    let (id, code) = host.pairings.open(600);
-    let addr = net::advertised(host.node.endpoint(), &Network::Loopback).await;
-    (id, Ticket::new(code, host.node.id(), Some(host.name.clone())).unwrap().at(&addr))
-}
-
-/// `newcomer` joins `host`'s mesh the way a person does it: ticket, fingerprint, approval.
-async fn join(newcomer: &Device, host: &Device) {
-    let (session, ticket) = ticket(host).await;
-    let joining =
-        ceremony::redeem(newcomer.node.endpoint(), &ticket, Ask::Device { name: newcomer.name.clone() }).await.unwrap();
-    let asked = host.pairings.get(session).unwrap();
-    assert_eq!(asked.fingerprint.as_deref(), Some(joining.fingerprint.as_str()));
-    assert_eq!(asked.identity, Some(newcomer.node.id()));
-    assert_eq!(joining.host, host.name);
-
-    host.node.append(Op::Add { device: newcomer.node.id(), name: newcomer.name.clone() }).await.unwrap();
-    let snapshot = host.node.snapshot().await.unwrap();
-    host.pairings.approve(session, Approval::Device { snapshot }).unwrap();
-    match joining.wait(Duration::from_secs(10)).await.unwrap() {
-        Some(Approval::Device { snapshot }) => newcomer.node.adopt(snapshot).await.unwrap(),
-        other => panic!("expected the list, got {other:?}"),
-    }
-}
-
-/// An app approved by `on` for `service`.
-async fn app(on: &Device, name: &str, service: &str, grants: &[&str], serves: bool) -> App {
-    let key = SecretKey::generate();
-    let note = on
-        .node
-        .issue(key.public(), name, service, grants.iter().map(|g| g.to_string()).collect(), serves, None)
-        .unwrap();
-    let endpoint = net::endpoint(key, &Network::Loopback).await.unwrap();
-    let node = Node::start(Config {
-        endpoint: endpoint.clone(),
-        network: Network::Loopback,
-        local: Local::App(note.clone()),
-        store: Arc::new(MemoryStore::default()),
-    })
-    .await
-    .unwrap();
-    node.adopt(on.node.snapshot().await.unwrap()).await.unwrap();
-    node.sync_all().await;
-    let router = Router::builder(endpoint).accept(mesh::ALPN, node.protocol()).spawn();
-    App { node, note, _router: router }
-}
-
-async fn eventually(what: &str, mut ok: impl FnMut() -> bool) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-    while !ok() {
-        assert!(tokio::time::Instant::now() < deadline, "never: {what}");
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
+use support::{app, device, device_with, eventually, join, ticket, uses};
 
 #[tokio::test]
 async fn devices_joined_through_one_another_all_know_each_other() {
@@ -137,30 +45,30 @@ async fn an_app_on_one_device_is_let_in_by_an_app_on_another_for_what_its_note_g
     let phone = device("phone").await;
     join(&phone, &laptop).await;
 
-    let files_laptop = app(&laptop, "ErisFiles", "files", &["files:read"], true).await;
-    let files_phone = app(&phone, "ErisFiles", "files", &["files:read"], true).await;
-    let notes_phone = app(&phone, "Notes", "notes", &["notes:read"], false).await;
+    let files_laptop = app(&laptop, "ErisFiles", "files/1", &["files:read"], true).await;
+    let files_phone = app(&phone, "ErisFiles", "files/1", &["files:read"], true).await;
+    let notes_phone = app(&phone, "Notes", "notes/1", &["notes:read"], false).await;
 
-    // The phone's ErisFiles finds the laptop's among the providers of `files`.
+    // The phone's ErisFiles finds the laptop's among the servers of `files/1`.
     eventually("the phone's app finds the laptop's", || {
-        files_phone.node.providers("files").iter().any(|p| p.id == files_laptop.node.id())
+        files_phone.node.servers("files/1").iter().any(|p| p.id == files_laptop.node.id())
     })
     .await;
     files_phone.node.sync_with(files_laptop.node.id()).await.unwrap();
     notes_phone.node.sync_with(files_laptop.node.id()).await.unwrap();
 
-    let caller = files_laptop.node.authorize(files_phone.node.id(), "files", Some("files:read")).unwrap();
+    let caller = files_laptop.node.authorize(files_phone.node.id(), "files/1", Some("files:read")).unwrap();
     assert_eq!(caller.device, phone.node.id());
     assert_eq!(caller.device_name, "phone");
     assert_eq!(caller.note, files_phone.note);
     assert!(matches!(
-        files_laptop.node.authorize(files_phone.node.id(), "files", Some("files:write")),
+        files_laptop.node.authorize(files_phone.node.id(), "files/1", Some("files:write")),
         Err(Error::Forbidden { .. })
     ));
-    // Approved for another service, the notes app is not let into this one.
-    assert!(files_laptop.node.authorize(notes_phone.node.id(), "files", None).is_err());
+    // Approved to use something else, the notes app is not let into this.
+    assert!(files_laptop.node.authorize(notes_phone.node.id(), "files/1", None).is_err());
 
-    // And a service dials a provider under its own name, which the provider then knows.
+    // And an app dials a server under its own name, which the server then knows.
     let conn = files_phone.node.connect(files_laptop.node.id(), mesh::ALPN).await.unwrap();
     assert_eq!(conn.remote_id(), files_laptop.node.id());
 }
@@ -174,10 +82,10 @@ async fn removing_a_device_cuts_its_apps_off_everywhere_at_once() {
     let desktop = device("desktop").await;
     join(&desktop, &laptop).await;
 
-    let files_desktop = app(&desktop, "ErisFiles", "files", &["files:read"], true).await;
-    let files_phone = app(&phone, "ErisFiles", "files", &["files:read"], true).await;
+    let files_desktop = app(&desktop, "ErisFiles", "files/1", &["files:read"], true).await;
+    let files_phone = app(&phone, "ErisFiles", "files/1", &["files:read"], true).await;
     files_phone.node.sync_with(files_desktop.node.id()).await.unwrap();
-    assert!(files_desktop.node.authorize(files_phone.node.id(), "files", Some("files:read")).is_ok());
+    assert!(files_desktop.node.authorize(files_phone.node.id(), "files/1", Some("files:read")).is_ok());
 
     let mut changes = files_desktop.node.subscribe();
     changes.borrow_and_update();
@@ -186,7 +94,7 @@ async fn removing_a_device_cuts_its_apps_off_everywhere_at_once() {
     // Pushed, not waited for: no one asks for it, and no periodic sync runs in this time.
     tokio::time::timeout(Duration::from_secs(5), changes.changed()).await.unwrap().unwrap();
     eventually("the desktop's app refuses the phone's", || {
-        files_desktop.node.authorize(files_phone.node.id(), "files", Some("files:read")).is_err()
+        files_desktop.node.authorize(files_phone.node.id(), "files/1", Some("files:read")).is_err()
     })
     .await;
     assert!(!files_desktop.node.directory().iter().any(|p| p.id == files_phone.node.id()));
@@ -199,15 +107,15 @@ async fn a_revoked_note_stops_counting() {
     laptop.node.create("laptop").await.unwrap();
     let phone = device("phone").await;
     join(&phone, &laptop).await;
-    let files_laptop = app(&laptop, "ErisFiles", "files", &["files:read"], true).await;
-    let files_phone = app(&phone, "ErisFiles", "files", &["files:read"], true).await;
+    let files_laptop = app(&laptop, "ErisFiles", "files/1", &["files:read"], true).await;
+    let files_phone = app(&phone, "ErisFiles", "files/1", &["files:read"], true).await;
     files_phone.node.sync_with(files_laptop.node.id()).await.unwrap();
-    assert!(files_laptop.node.authorize(files_phone.node.id(), "files", None).is_ok());
+    assert!(files_laptop.node.authorize(files_phone.node.id(), "files/1", None).is_ok());
 
     // The laptop revokes the phone's app; the phone itself stays.
     laptop.node.append(Op::Revoke { note: files_phone.note.id }).await.unwrap();
     eventually("the laptop's app refuses the revoked one", || {
-        files_laptop.node.authorize(files_phone.node.id(), "files", None).is_err()
+        files_laptop.node.authorize(files_phone.node.id(), "files/1", None).is_err()
     })
     .await;
     assert!(laptop.node.list().unwrap().is_member(&phone.node.id()));
@@ -236,19 +144,18 @@ async fn a_stranger_learns_nothing_and_changes_nothing() {
 }
 
 #[tokio::test]
-async fn an_app_without_erisauth_beside_it_gets_its_note_by_ticket() {
+async fn an_app_without_eon_beside_it_gets_its_note_by_ticket() {
     let laptop = device("laptop").await;
     laptop.node.create("laptop").await.unwrap();
     let browser = SecretKey::generate();
     let endpoint = net::endpoint(browser.clone(), &Network::Loopback).await.unwrap();
 
     let (session, ticket) = ticket(&laptop).await;
-    let ask =
-        Ask::App { name: "Tasks".into(), service: "erisdb".into(), grants: vec!["tasks:*".into()], serves: false };
+    let ask = Ask::App { name: "Tasks".into(), uses: uses("database/1", &["tasks:*"]), serves: vec![] };
     let joining = ceremony::redeem(&endpoint, &ticket, ask).await.unwrap();
     assert_eq!(laptop.pairings.get(session).unwrap().fingerprint.as_deref(), Some(joining.fingerprint.as_str()));
 
-    let note = laptop.node.issue(browser.public(), "Tasks", "erisdb", vec!["tasks:*".into()], false, None).unwrap();
+    let note = laptop.node.issue(browser.public(), "Tasks", uses("database/1", &["tasks:*"]), vec![], None).unwrap();
     let snapshot = laptop.node.snapshot().await.unwrap();
     laptop.pairings.approve(session, Approval::App { note: note.clone(), snapshot }).unwrap();
     match joining.wait(Duration::from_secs(10)).await.unwrap() {
@@ -325,9 +232,9 @@ async fn entries_written_back_to_back_all_arrive() {
     laptop.node.create("laptop").await.unwrap();
     let phone = device("phone").await;
     join(&phone, &laptop).await;
-    let a = app(&phone, "One", "files", &["files:read"], true).await;
-    let b = app(&phone, "Two", "files", &["files:read"], true).await;
-    let watcher = app(&laptop, "ErisFiles", "files", &["files:read"], true).await;
+    let a = app(&phone, "One", "files/1", &["files:read"], true).await;
+    let b = app(&phone, "Two", "files/1", &["files:read"], true).await;
+    let watcher = app(&laptop, "ErisFiles", "files/1", &["files:read"], true).await;
     laptop.node.append(Op::Revoke { note: a.note.id }).await.unwrap();
     laptop.node.append(Op::Revoke { note: b.note.id }).await.unwrap();
     eventually("both revocations reach an app", || {
@@ -343,7 +250,7 @@ async fn whoever_is_cut_off_hears_so() {
     laptop.node.create("laptop").await.unwrap();
     let phone = device("phone").await;
     join(&phone, &laptop).await;
-    let files_laptop = app(&laptop, "ErisFiles", "files", &["files:read"], true).await;
+    let files_laptop = app(&laptop, "ErisFiles", "files/1", &["files:read"], true).await;
     files_laptop.node.sync_all().await;
     phone.node.sync_all().await;
 
@@ -369,13 +276,13 @@ async fn apps_heard_of_second_hand_meet_without_waiting() {
     laptop.node.create("laptop").await.unwrap();
     let phone = device("phone").await;
     join(&phone, &laptop).await;
-    let files_laptop = app(&laptop, "ErisFiles", "files", &["files:read"], true).await;
-    let files_phone = app(&phone, "ErisFiles", "files", &["files:read"], true).await;
+    let files_laptop = app(&laptop, "ErisFiles", "files/1", &["files:read"], true).await;
+    let files_phone = app(&phone, "ErisFiles", "files/1", &["files:read"], true).await;
     // Neither app is told of the other by anyone but the devices; both find each other, and each
     // lets the other in, well before any periodic announce.
     eventually("each app lets the other in", || {
-        files_laptop.node.authorize(files_phone.node.id(), "files", Some("files:read")).is_ok()
-            && files_phone.node.authorize(files_laptop.node.id(), "files", Some("files:read")).is_ok()
+        files_laptop.node.authorize(files_phone.node.id(), "files/1", Some("files:read")).is_ok()
+            && files_phone.node.authorize(files_laptop.node.id(), "files/1", Some("files:read")).is_ok()
     })
     .await;
 }
@@ -397,44 +304,44 @@ async fn an_app_approved_again_right_after_a_revocation_gets_a_note_that_counts(
     let laptop = device("laptop").await;
     laptop.node.create("laptop").await.unwrap();
     let app = SecretKey::generate().public();
-    let first = laptop.node.issue(app, "Notes", "notes", vec!["notes:read".into()], false, None).unwrap();
+    let first = laptop.node.issue(app, "Notes", uses("notes/1", &["notes:read"]), vec![], None).unwrap();
     laptop.node.append(Op::Revoke { note: first.id }).await.unwrap();
-    let again = laptop.node.issue(app, "Notes", "notes", vec!["notes:read".into()], false, None).unwrap();
+    let again = laptop.node.issue(app, "Notes", uses("notes/1", &["notes:read"]), vec![], None).unwrap();
     assert_ne!(again.id, first.id);
     again.check(&laptop.node.list().unwrap()).unwrap();
 }
 
 #[tokio::test]
-async fn a_device_that_joins_later_finds_a_service_it_never_met() {
+async fn a_device_that_joins_later_finds_a_server_it_never_met() {
     let laptop = device("laptop").await;
     laptop.node.create("laptop").await.unwrap();
     let server = device("server").await;
     join(&server, &laptop).await;
-    let db = app(&server, "ErisDB", "erisdb", &[], true).await;
+    let db = app(&server, "ErisDB", "database/1", &[], true).await;
     // The phone joins through the laptop, which may or may not have heard of ErisDB yet.
     let phone = device("phone").await;
     join(&phone, &laptop).await;
     eventually("the phone finds the mesh's ErisDB", || {
-        phone.node.provider("erisdb").is_some_and(|p| p.id == db.node.id())
+        phone.node.server("database/1").is_some_and(|p| p.id == db.node.id())
     })
     .await;
     assert!(phone.node.counts(&db.note));
 }
 
 #[tokio::test]
-async fn the_one_provider_of_a_service_is_the_most_recently_approved_that_counts() {
+async fn the_one_server_of_a_capability_is_the_most_recently_approved_that_counts() {
     let laptop = device("laptop").await;
     laptop.node.create("laptop").await.unwrap();
-    let old = app(&laptop, "ErisDB", "erisdb", &[], true).await;
+    let old = app(&laptop, "ErisDB", "database/1", &[], true).await;
     tokio::time::sleep(Duration::from_millis(1100)).await;
-    let new = app(&laptop, "ErisDB", "erisdb", &[], true).await;
-    let watcher = app(&laptop, "Tasks", "notes", &[], true).await;
-    eventually("the newer ErisDB provides", || watcher.node.provider("erisdb").is_some_and(|p| p.id == new.node.id()))
+    let new = app(&laptop, "ErisDB", "database/1", &[], true).await;
+    let watcher = app(&laptop, "Tasks", "notes/1", &[], true).await;
+    eventually("the newer ErisDB serves", || watcher.node.server("database/1").is_some_and(|p| p.id == new.node.id()))
         .await;
     // Revoking the newer one leaves the older; a person approving a new ErisDB revokes the old.
     laptop.node.append(Op::Revoke { note: new.note.id }).await.unwrap();
-    eventually("the older ErisDB provides again", || {
-        watcher.node.provider("erisdb").is_some_and(|p| p.id == old.node.id())
+    eventually("the older ErisDB serves again", || {
+        watcher.node.server("database/1").is_some_and(|p| p.id == old.node.id())
     })
     .await;
 }
@@ -456,8 +363,7 @@ async fn a_newcomer_whose_page_went_away_collects_its_answer_from_a_new_one() {
     let browser = SecretKey::generate();
     let endpoint = net::endpoint(browser.clone(), &Network::Loopback).await.unwrap();
     let (session, ticket) = ticket(&laptop).await;
-    let ask =
-        Ask::App { name: "Tasks".into(), service: "erisdb".into(), grants: vec!["tasks:*".into()], serves: false };
+    let ask = Ask::App { name: "Tasks".into(), uses: uses("database/1", &["tasks:*"]), serves: vec![] };
     let first = ceremony::redeem(&endpoint, &ticket, ask.clone()).await.unwrap();
     let host = first.host.clone();
     drop(first);
@@ -465,7 +371,7 @@ async fn a_newcomer_whose_page_went_away_collects_its_answer_from_a_new_one() {
     // A later page, under the same key, waits for the same answer.
     let again = ceremony::resume(&endpoint, &ticket, ask, host).unwrap();
     assert_eq!(laptop.pairings.get(session).unwrap().fingerprint.as_deref(), Some(again.fingerprint.as_str()));
-    let note = laptop.node.issue(browser.public(), "Tasks", "erisdb", vec!["tasks:*".into()], false, None).unwrap();
+    let note = laptop.node.issue(browser.public(), "Tasks", uses("database/1", &["tasks:*"]), vec![], None).unwrap();
     laptop
         .pairings
         .approve(session, Approval::App { note: note.clone(), snapshot: laptop.node.snapshot().await.unwrap() })
@@ -476,8 +382,7 @@ async fn a_newcomer_whose_page_went_away_collects_its_answer_from_a_new_one() {
 
     // Another key resuming the same ticket collects nothing.
     let other = net::endpoint(SecretKey::generate(), &Network::Loopback).await.unwrap();
-    let ask =
-        Ask::App { name: "Tasks".into(), service: "erisdb".into(), grants: vec!["tasks:*".into()], serves: false };
+    let ask = Ask::App { name: "Tasks".into(), uses: uses("database/1", &["tasks:*"]), serves: vec![] };
     let thief = ceremony::resume(&other, &ticket, ask, "laptop".into()).unwrap();
     assert!(matches!(thief.collect().await, Err(Error::Unauthorized)));
 }

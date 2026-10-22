@@ -89,9 +89,10 @@ fn a_denial_is_final_and_a_collected_session_cannot_be_denied() {
 fn what_is_asked_is_checked() {
     let pairings = Pairings::new();
     let (_, code) = pairings.open(600);
-    let bad = Ask::App { name: "Notes".into(), service: "Not A Service".into(), grants: vec![], serves: false };
-    assert!(pairings.redeem(&code, bad, phone()).is_err());
-    let bad = Ask::App { name: "Notes".into(), service: "notes".into(), grants: vec!["NOPE".into()], serves: false };
+    let nothing = Ask::App { name: "Notes".into(), uses: Default::default(), serves: vec![] };
+    assert!(pairings.redeem(&code, nothing, phone()).is_err());
+    let uses = [("notes/1".parse().unwrap(), vec!["NOPE".to_string()])].into();
+    let bad = Ask::App { name: "Notes".into(), uses, serves: vec![] };
     assert!(pairings.redeem(&code, bad, phone()).is_err());
 }
 

@@ -1,4 +1,4 @@
-use erisoverlaynetwork::ticket::{SCHEME, Ticket, VERSION};
+use erisoverlaynetwork::ticket::{JOIN_SCHEME, Kind, SCHEME, Ticket, VERSION};
 
 fn eid() -> iroh::EndpointId {
     iroh::SecretKey::generate().public()
@@ -37,4 +37,23 @@ fn damaged_foreign_or_unknown_version_tickets_are_refused() {
     let v1 =
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(format!(r#"{{"v":1,"eid":"{}","token":"t"}}"#, eid()));
     assert!(Ticket::parse(&format!("{SCHEME}{v1}")).is_err());
+}
+
+#[test]
+fn a_join_ticket_names_its_device_and_says_what_it_is() {
+    let id = eid();
+    let ticket = Ticket::join("code".into(), id, "mac".into()).unwrap();
+    let encoded = ticket.encode().unwrap();
+    assert!(encoded.starts_with(JOIN_SCHEME));
+    let read = Ticket::parse(&encoded).unwrap();
+    assert_eq!(read.kind, Kind::Join);
+    assert_eq!(read, ticket);
+    assert_eq!(
+        Ticket::parse(&Ticket::new("code".into(), id, None).unwrap().encode().unwrap()).unwrap().kind,
+        Kind::Pair
+    );
+    assert!(Ticket::join("code".into(), id, " ".into()).is_err());
+    // A join ticket without a name does not read.
+    let nameless = Ticket::new("code".into(), id, None).unwrap().encode().unwrap();
+    assert!(Ticket::parse(&nameless.replacen(SCHEME, JOIN_SCHEME, 1)).is_err());
 }

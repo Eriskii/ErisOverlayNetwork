@@ -10,7 +10,7 @@
 //!   removal reaches every reachable participant without waiting for anyone to ask.
 //!
 //! A node also syncs with everyone when it starts, whenever its addresses change, and every
-//! [`ANNOUNCE`] besides. A device's node — ErisAuth's — signs: it writes entries and issues
+//! [`ANNOUNCE`] besides. A device's node — ErisOverlayNetwork's — signs: it writes entries and issues
 //! notes. An app's node takes part under its note.
 //!
 //! A service checks who is calling with [`Node::authorize`], and watches [`Node::subscribe`]
@@ -29,6 +29,7 @@ use n0_future::boxed::BoxFuture;
 use n0_future::task::AbortOnDropHandle;
 use serde::{Deserialize, Serialize};
 
+use crate::capability::{Serves, Uses};
 use crate::devices::{DeviceId, DeviceList, EntryId, Member, MeshId, Op};
 use crate::directory::{Presence, Role, Snapshot};
 use crate::error::{Error, Result};
@@ -52,7 +53,7 @@ pub const FRESH: Duration = Duration::from_secs(120);
 /// Who this node is in the mesh.
 #[derive(Clone)]
 pub enum Local {
-    /// A device: ErisAuth, holding the device's key.
+    /// A device: ErisOverlayNetwork, holding the device's key.
     Device(SecretKey),
     /// An app, under its note.
     App(Note),
@@ -331,21 +332,15 @@ impl Node {
         self.read(|s| s.directory.values().cloned().collect())
     }
 
-    /// The participants serving `service`, other than this one.
-    pub fn providers(&self, service: &str) -> Vec<Presence> {
-        self.read(|s| {
-            s.directory
-                .values()
-                .filter(|p| p.note().is_some_and(|n| n.body.serves && n.body.service == service))
-                .cloned()
-                .collect()
-        })
+    /// The participants serving `capability`, other than this one.
+    pub fn servers(&self, capability: &str) -> Vec<Presence> {
+        self.read(|s| s.directory.values().filter(|p| p.serving(capability).is_some()).cloned().collect())
     }
 
-    /// The one app providing `service`, for a service a mesh has one of, such as ErisDB: of
+    /// The server of `capability`, for one a mesh has a single server of, such as a database: of
     /// the apps approved to serve it, the most recently approved. This node itself is not one.
-    pub fn provider(&self, service: &str) -> Option<Presence> {
-        self.providers(service).into_iter().max_by_key(|p| p.note().map(|n| (n.body.at, n.id)))
+    pub fn server(&self, capability: &str) -> Option<Presence> {
+        crate::directory::newest(self.servers(capability))
     }
 
     /// Everything a newcomer needs, this node's own presence included.
@@ -364,21 +359,21 @@ impl Node {
         self.inner.changes.subscribe()
     }
 
-    /// Whether `caller` may use `service` here, and as whom; with `required`, whether its note
-    /// also grants that.
-    pub fn authorize(&self, caller: EndpointId, service: &str, required: Option<&str>) -> Result<Caller> {
+    /// Whether `caller` may use `capability` here, and as whom; with `required`, whether its note
+    /// also grants that there.
+    pub fn authorize(&self, caller: EndpointId, capability: &str, required: Option<&str>) -> Result<Caller> {
         self.read(|s| {
             let list = s.list.as_ref().ok_or(Error::Unauthorized)?;
             let presence =
                 s.directory.get(&caller).ok_or(Error::Forbidden { permission: "a known participant".into() })?;
-            let note =
-                presence.note().ok_or(Error::Forbidden { permission: format!("an app approved for {service}") })?;
+            let refused = || Error::Forbidden { permission: format!("an app approved to use {capability}") };
+            let note = presence.note().ok_or_else(refused)?;
             note.check(list)?;
-            if note.app() != caller || note.body.service != service {
-                return Err(Error::Forbidden { permission: format!("an app approved for {service}") });
+            if note.app() != caller || note.uses(capability).is_none() {
+                return Err(refused());
             }
             if let Some(required) = required
-                && !note.grants(service, required)
+                && !note.grants(capability, required)
             {
                 return Err(Error::Forbidden { permission: required.to_string() });
             }
@@ -444,14 +439,14 @@ impl Node {
         Ok(signed)
     }
 
-    /// Approve an app, as this device.
+    /// Approve an app, as this device: for what it uses, with the grants it holds in each, and
+    /// what it serves.
     pub fn issue(
         &self,
         app: EndpointId,
         name: &str,
-        service: &str,
-        grants: Vec<String>,
-        serves: bool,
+        uses: Uses,
+        serves: Vec<Serves>,
         program: Option<String>,
     ) -> Result<Note> {
         let Local::Device(key) = &self.inner.local else {
@@ -463,8 +458,7 @@ impl Node {
             device: key.public(),
             app,
             name: crate::check_name(name)?,
-            service: service.to_string(),
-            grants,
+            uses,
             serves,
             program,
             at: crate::now(),

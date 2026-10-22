@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- The other devices are reached over Iroh: relays, hole punching, direct addresses. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Requests waiting for the person, and changes other devices make, show as notifications. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:theme="@style/Theme.ErisOverlayNetwork">
+        <!-- singleTop: a ticket opened while the app is up reaches onNewIntent. -->
+        <activity
+            android:name=".MainActivity"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
+            android:exported="true"
+            android:launchMode="singleTop">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- A ticket scanned with the camera opens here: a device's, `eris://pair/…`, to join its
+                 mesh, or a new device's own, `eris://join/…`, to add it. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="eris" android:host="pair" />
+                <data android:scheme="eris" android:host="join" />
+            </intent-filter>
+        </activity>
+        <!-- Apps bind here to be approved; Android tells the service which app is calling. -->
+        <service
+            android:name=".AuthService"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="dev.eris.eon.SIGN_IN" />
+            </intent-filter>
+        </service>
+    </application>
+
+</manifest>

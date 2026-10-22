@@ -1,6 +1,10 @@
+[workspace]
+members = [".", "eon", "eon-android"]
+resolver = "3"
+
 [package]
 name = "erisoverlaynetwork"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "The Eris mesh: one signed list of your devices, approvals for the apps on them, and the connections between them, over Iroh"
 license = "MIT"
@@ -46,6 +50,8 @@ tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
+# A relay on loopback, for the tests of what a relay-only network finds.
+iroh-relay = { version = "1", features = ["server"] }
 rqrr = "0.10.1"
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
@@ -55,3 +61,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies]
 getrandom = { version = "0.3", features = ["wasm_js"] }
 uuid = { version = "1", features = ["v4", "serde", "js"] }
+
+[profile.release]
+# The Android library ships in the APK; its dynamic symbols, the JNI entry points, stay.
+strip = "symbols"

@@ -1,9 +1,10 @@
-//! The app's side of the agent socket, against a stand-in agent that answers as ErisAuth does.
+//! The app's side of the agent socket, against a stand-in agent that answers as ErisOverlayNetwork does.
 
 use erisoverlaynetwork::agent::{self, Answer, Ask, Reply, Request};
 use erisoverlaynetwork::devices::DeviceList;
 use erisoverlaynetwork::directory::Snapshot;
 use erisoverlaynetwork::note::{Note, NoteBody};
+use erisoverlaynetwork::{Serves, Uses};
 use iroh::SecretKey;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -31,7 +32,15 @@ fn mesh() -> (SecretKey, Snapshot) {
     (device, Snapshot { mesh: list.mesh(), entries: list.entries(), directory: vec![] })
 }
 
-fn note(device: &SecretKey, snapshot: &Snapshot, app: iroh::EndpointId, service: &str) -> Note {
+fn files(grants: &[&str]) -> Uses {
+    Uses::from([("files/1".parse().unwrap(), grants.iter().map(|g| g.to_string()).collect())])
+}
+
+fn serving() -> Vec<Serves> {
+    vec![Serves::new("files/1".parse().unwrap())]
+}
+
+fn note(device: &SecretKey, snapshot: &Snapshot, app: iroh::EndpointId, uses: Uses) -> Note {
     Note::issue(
         device,
         NoteBody {
@@ -39,9 +48,8 @@ fn note(device: &SecretKey, snapshot: &Snapshot, app: iroh::EndpointId, service:
             device: device.public(),
             app,
             name: "ErisFiles".into(),
-            service: service.into(),
-            grants: vec!["files:read".into()],
-            serves: true,
+            uses,
+            serves: serving(),
             program: Some("/usr/bin/erisfiles".into()),
             at: 0,
         },
@@ -50,7 +58,7 @@ fn note(device: &SecretKey, snapshot: &Snapshot, app: iroh::EndpointId, service:
 }
 
 fn ask(app: iroh::EndpointId) -> Ask {
-    Ask { service: "files".into(), name: "ErisFiles".into(), grants: vec!["files:read".into()], serves: true, app }
+    Ask { name: "ErisFiles".into(), uses: files(&["files:read", "files:write"]), serves: serving(), app }
 }
 
 #[tokio::test]
@@ -58,10 +66,11 @@ async fn an_app_gets_its_note_and_the_mesh() {
     let dir = tempfile::tempdir().unwrap();
     let (device, snapshot) = mesh();
     let me = SecretKey::generate().public();
-    let given = note(&device, &snapshot, me, "files");
+    // The person approved reading only.
+    let given = note(&device, &snapshot, me, files(&["files:read"]));
     let (n, s) = (given.clone(), snapshot.clone());
     let path = agent(dir.path(), move |request| {
-        assert!(matches!(request, Request::Approve { v: 2, ref ask } if ask.app == me && ask.serves));
+        assert!(matches!(request, Request::Approve { v: 3, ref ask } if ask.app == me && ask.serves == serving()));
         Reply::Approved { note: n.clone(), snapshot: s.clone() }
     })
     .await;
@@ -74,8 +83,19 @@ async fn a_note_for_someone_else_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let (device, snapshot) = mesh();
     let me = SecretKey::generate().public();
-    let wrong = note(&device, &snapshot, SecretKey::generate().public(), "files");
+    let wrong = note(&device, &snapshot, SecretKey::generate().public(), files(&["files:read"]));
     let path = agent(dir.path(), move |_| Reply::Approved { note: wrong.clone(), snapshot: snapshot.clone() }).await;
+    let mut agent = agent::connect_to(&path).await.unwrap().unwrap();
+    assert!(agent.approve(&ask(me)).await.is_err());
+}
+
+#[tokio::test]
+async fn a_note_for_more_than_was_asked_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let (device, snapshot) = mesh();
+    let me = SecretKey::generate().public();
+    let more = note(&device, &snapshot, me, files(&["*"]));
+    let path = agent(dir.path(), move |_| Reply::Approved { note: more.clone(), snapshot: snapshot.clone() }).await;
     let mut agent = agent::connect_to(&path).await.unwrap().unwrap();
     assert!(agent.approve(&ask(me)).await.is_err());
 }

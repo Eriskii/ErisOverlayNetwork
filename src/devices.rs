@@ -31,7 +31,7 @@ use crate::error::{Error, Result};
 use crate::note::NoteId;
 use crate::signed::{Signed, digest_id};
 
-/// A device: the public key ErisAuth holds on it, which is also its Iroh endpoint id.
+/// A device: the public key ErisOverlayNetwork holds on it, which is also its Iroh endpoint id.
 pub type DeviceId = iroh::PublicKey;
 
 /// Domain tag for list entries.

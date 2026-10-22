@@ -20,16 +20,23 @@ pub struct Request {
     pub expires: i64,
 }
 
-/// Print a ticket every way a person might want it: as a code for a camera,
-/// and as text for anyone who would rather type.
-pub fn show(out: &mut impl Write, ticket: &Ticket, encoded: &str) -> std::io::Result<()> {
+/// Print a ticket every way a person might want it: as a QR code for a camera, as the short
+/// [code](crate::code) standing in for it when there is one, and as text to paste.
+pub fn show(out: &mut impl Write, ticket: &Ticket, encoded: &str, code: Option<&str>) -> std::io::Result<()> {
     match qr::to_blocks(encoded) {
         Ok(blocks) => writeln!(out, "\n{blocks}")?,
         // Too much data for any QR version is the only realistic failure,
         // and it should not cost the operator the ticket.
         Err(e) => writeln!(out, "(the ticket {e})\n")?,
     }
-    writeln!(out, "Scan this with the new device, or with your phone's camera.\n")?;
+    match ticket.kind {
+        crate::ticket::Kind::Pair => writeln!(out, "Scan this with the new device, or with your phone's camera.")?,
+        crate::ticket::Kind::Join => writeln!(out, "Scan this with your phone, or any device already among yours.")?,
+    }
+    if let Some(code) = code {
+        writeln!(out, "Or type this code on the new device:  {code}")?;
+    }
+    writeln!(out)?;
     if let Some(name) = &ticket.name {
         writeln!(out, "  device      {name}")?;
     }
@@ -37,9 +44,8 @@ pub fn show(out: &mut impl Write, ticket: &Ticket, encoded: &str) -> std::io::Re
     if let Some(relay) = &ticket.relay {
         writeln!(out, "  relay       {relay}")?;
     }
-    writeln!(out, "  code        {}", ticket.token)?;
     writeln!(out, "\n  ticket      {encoded}")?;
-    writeln!(out, "\nThe code grants nothing on its own — you approve what asks to join.")
+    writeln!(out, "\nThe ticket grants nothing on its own: you approve what it lets in.")
 }
 
 /// Lines typed on stdin, read off a blocking thread so that waiting and

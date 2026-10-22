@@ -61,3 +61,24 @@ async fn an_empty_selection_denies() {
 async fn closed_input_cancels() {
     assert!(answer(&[]).await.0.is_err());
 }
+
+#[test]
+fn a_ticket_is_shown_with_its_code_and_says_who_scans_it() {
+    use erisoverlaynetwork::prompt::show;
+    use erisoverlaynetwork::ticket::Ticket;
+    let id = iroh::SecretKey::generate().public();
+    let pair = Ticket::new("secret".into(), id, Some("laptop".into())).unwrap();
+    let mut out = Vec::new();
+    show(&mut out, &pair, &pair.encode().unwrap(), Some("K7QX-M2PA")).unwrap();
+    let out = String::from_utf8(out).unwrap();
+    assert!(out.contains("Scan this with the new device"), "{out}");
+    assert!(out.contains("Or type this code on the new device:  K7QX-M2PA"), "{out}");
+    assert!(!out.contains("secret"), "the one-time secret is shown only inside the ticket: {out}");
+
+    let join = Ticket::join("secret".into(), id, "mac".into()).unwrap();
+    let mut out = Vec::new();
+    show(&mut out, &join, &join.encode().unwrap(), None).unwrap();
+    let out = String::from_utf8(out).unwrap();
+    assert!(out.contains("Scan this with your phone, or any device already among yours."), "{out}");
+    assert!(!out.contains("type this code"), "{out}");
+}

@@ -1,20 +1,21 @@
 //! Notes: a device approving one app.
 //!
-//! A note names the app's key, the service it takes part in, what it may do there, and
-//! whether it serves that service to others, and the device signs it. Anyone holding the
-//! mesh's [device list](crate::devices) can check one: the device must be a member, and no
-//! member may have revoked the note. A note does not expire; it ends when its device leaves
-//! the mesh or a device revokes it.
+//! A note names the app's key, the [capabilities](crate::capability) it uses with the grants it
+//! holds in each, and those it serves, and the device signs it. Anyone holding the mesh's
+//! [device list](crate::devices) can check one: the device must be a member, and no member may
+//! have revoked the note. A note does not expire; it ends when its device leaves the mesh or a
+//! device revokes it.
 
 use iroh::SecretKey;
 use serde::{Deserialize, Serialize};
 
+use crate::capability::{Serves, Uses};
 use crate::devices::{DeviceId, DeviceList, MeshId};
 use crate::error::{Error, Result};
 use crate::signed::{Signed, digest_id};
 
 /// Domain tag for notes.
-pub const NOTE_DOMAIN: &str = "eris-mesh/note/0";
+pub const NOTE_DOMAIN: &str = "eris-mesh/note/1";
 
 /// An app: the public key it holds, which is also its Iroh endpoint id.
 pub type AppId = iroh::PublicKey;
@@ -32,14 +33,12 @@ pub struct NoteBody {
     pub app: AppId,
     /// The app's name for itself, as the person approved it.
     pub name: String,
-    /// The service it takes part in: `files`, `erisdb`.
-    pub service: String,
-    /// What it may do there, as permission patterns. May be empty.
-    #[serde(default)]
-    pub grants: Vec<String>,
-    /// Whether it serves the service to other apps.
-    #[serde(default)]
-    pub serves: bool,
+    /// What it uses, and the grants it holds in each.
+    #[serde(default, skip_serializing_if = "Uses::is_empty")]
+    pub uses: Uses,
+    /// What it serves.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub serves: Vec<Serves>,
     /// What the device's operating system said the app is: an executable's path, or an
     /// Android package and the SHA-256 of its signing certificate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -53,15 +52,6 @@ pub struct Note {
     pub id: NoteId,
     pub body: NoteBody,
     pub signed: Signed,
-}
-
-/// A service name: one permission segment, `[a-z0-9][a-z0-9._-]*`.
-pub fn check_service(service: &str) -> Result<()> {
-    if service.len() <= 64 && crate::permission::is_segment(service, false) {
-        Ok(())
-    } else {
-        Err(Error::BadRequest(format!("{service:?} is not a service name: [a-z0-9][a-z0-9._-]*")))
-    }
 }
 
 impl Note {
@@ -79,11 +69,8 @@ impl Note {
         if body.device != signed.by {
             return Err(Error::Unauthorized);
         }
-        check_service(&body.service)?;
         crate::check_name(&body.name)?;
-        if !body.grants.is_empty() {
-            crate::permission::check_grants(&body.grants)?;
-        }
+        crate::capability::check(&body.uses, &body.serves)?;
         Ok(Note { id: NoteId(signed.digest(NOTE_DOMAIN)), body, signed })
     }
 
@@ -101,9 +88,19 @@ impl Note {
         Ok(())
     }
 
-    /// True when this note lets its app do `required` in `service`.
-    pub fn grants(&self, service: &str, required: &str) -> bool {
-        self.body.service == service && crate::permission::granted(&self.body.grants, required)
+    /// The grants this note's app holds in `capability`, when it uses it.
+    pub fn uses(&self, capability: &str) -> Option<&[String]> {
+        self.body.uses.get(capability).map(Vec::as_slice)
+    }
+
+    /// True when this note lets its app do `required` in `capability`.
+    pub fn grants(&self, capability: &str, required: &str) -> bool {
+        self.uses(capability).is_some_and(|grants| crate::permission::granted(grants, required))
+    }
+
+    /// How this note's app serves `capability`, when it does.
+    pub fn serving(&self, capability: &str) -> Option<&Serves> {
+        self.body.serves.iter().find(|s| s.capability.as_str() == capability)
     }
 
     pub fn app(&self) -> AppId {

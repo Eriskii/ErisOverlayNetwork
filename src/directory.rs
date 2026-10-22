@@ -9,6 +9,7 @@ use std::net::SocketAddr;
 
 use serde::{Deserialize, Serialize};
 
+use crate::capability::Serves;
 use crate::devices::{DeviceList, MeshId};
 use crate::error::{Error, Result};
 use crate::note::Note;
@@ -20,7 +21,7 @@ pub const MAX_ADDRS: usize = 16;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "snake_case")]
 pub enum Role {
-    /// A member device: ErisAuth on it.
+    /// A member device: ErisOverlayNetwork on it.
     Device,
     /// An app a member device approved.
     App { note: Note },
@@ -60,6 +61,11 @@ impl Presence {
         }
     }
 
+    /// How this participant serves `capability`, when it is an app approved to.
+    pub fn serving(&self, capability: &str) -> Option<&Serves> {
+        self.note().and_then(|n| n.serving(capability))
+    }
+
     /// The Iroh address these hints give.
     pub fn endpoint_addr(&self) -> iroh::EndpointAddr {
         let relay = self.relay.as_deref().and_then(|r| r.parse::<iroh::RelayUrl>().ok());
@@ -89,19 +95,20 @@ impl Snapshot {
         Ok(list)
     }
 
-    /// The one app providing `service`, for a service a mesh has one of, such as ErisDB: of
-    /// the apps approved to serve it, the most recently approved.
-    pub fn provider(&self, service: &str) -> Option<&Presence> {
-        self.providers(service).into_iter().max_by_key(|p| p.note().map(|n| (n.body.at, n.id)))
+    /// The server of `capability`, for one a mesh has a single server of, such as a database:
+    /// of the apps approved to serve it, the most recently approved.
+    pub fn server(&self, capability: &str) -> Option<&Presence> {
+        newest(self.servers(capability))
     }
 
-    /// The participants serving `service`, as far as this snapshot knows.
-    pub fn providers(&self, service: &str) -> Vec<&Presence> {
+    /// The participants serving `capability`, as far as this snapshot knows.
+    pub fn servers(&self, capability: &str) -> Vec<&Presence> {
         let Ok(list) = self.list() else { return Vec::new() };
-        self.directory
-            .iter()
-            .filter(|p| p.check(&list).is_ok())
-            .filter(|p| p.note().is_some_and(|n| n.body.serves && n.body.service == service))
-            .collect()
+        self.directory.iter().filter(|p| p.check(&list).is_ok()).filter(|p| p.serving(capability).is_some()).collect()
     }
+}
+
+/// Of `servers`, the one most recently approved.
+pub fn newest<P: std::borrow::Borrow<Presence>>(servers: impl IntoIterator<Item = P>) -> Option<P> {
+    servers.into_iter().max_by_key(|p| p.borrow().note().map(|n| (n.body.at, n.id)))
 }

@@ -1,8 +1,9 @@
 //! Letting a device or an app in from another screen: a ticket, a fingerprint, one approval.
 //!
-//! A member device shows a [ticket](crate::ticket). The newcomer dials the device it names
+//! A member device shows a [ticket](crate::ticket), or a [code](crate::code) standing in for
+//! one. The newcomer dials the device it names
 //! over [`ALPN`] and redeems the code, saying what it asks to be: a device joining the mesh,
-//! or an app that wants a [note](crate::note) — a browser app, which has no ErisAuth beside
+//! or an app that wants a [note](crate::note) — a browser app, which has no ErisOverlayNetwork beside
 //! it to ask. Both screens show the [fingerprint](crate::pairing::fingerprint) of the request,
 //! computed by each side for itself; a person compares them and approves. The newcomer
 //! collects the answer, which only the key that redeemed can do: for a device, the list with
@@ -10,6 +11,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::capability::{Serves, Uses};
 use crate::directory::Snapshot;
 use crate::error::{Error, Result};
 use crate::note::Note;
@@ -31,14 +33,14 @@ pub const POLL: std::time::Duration = std::time::Duration::from_millis(500);
 pub enum Ask {
     /// A device joining the mesh, under this name.
     Device { name: String },
-    /// An app that wants a note.
+    /// An app that wants a note: for what it uses, with the grants it asks for in each, and
+    /// what it serves.
     App {
         name: String,
-        service: String,
         #[serde(default)]
-        grants: Vec<String>,
+        uses: Uses,
         #[serde(default)]
-        serves: bool,
+        serves: Vec<Serves>,
     },
 }
 
@@ -46,13 +48,9 @@ impl Ask {
     pub fn check(&self) -> Result<()> {
         match self {
             Ask::Device { name } => crate::check_name(name).map(drop),
-            Ask::App { name, service, grants, .. } => {
+            Ask::App { name, uses, serves } => {
                 crate::check_name(name)?;
-                crate::note::check_service(service)?;
-                if !grants.is_empty() {
-                    crate::permission::check_grants(grants)?;
-                }
-                Ok(())
+                crate::capability::check(uses, serves)
             }
         }
     }
@@ -122,6 +120,11 @@ pub struct Joining {
 /// Redeem `ticket` from `endpoint`, asking for `ask`.
 pub async fn redeem(endpoint: &iroh::Endpoint, ticket: &Ticket, ask: Ask) -> Result<Joining> {
     ask.check()?;
+    if ticket.kind != crate::ticket::Kind::Pair {
+        return Err(Error::BadRequest(
+            "that ticket is a device asking to be added: scan it with a device already in".into(),
+        ));
+    }
     if ticket.eid == endpoint.id() {
         return Err(Error::BadRequest("this is this device's own ticket".into()));
     }
@@ -219,10 +222,11 @@ impl Joining {
                 }
                 Ok(())
             }
-            (Approval::App { note, snapshot }, Ask::App { service, .. }) => {
+            (Approval::App { note, snapshot }, Ask::App { uses, serves, .. }) => {
                 let list = snapshot.list()?;
                 note.check(&list)?;
-                if note.app() != me || note.device() != self.ticket.eid || note.body.service != *service {
+                let within = crate::capability::within((uses, serves), (&note.body.uses, &note.body.serves));
+                if note.app() != me || note.device() != self.ticket.eid || !within {
                     return bad("approves something other than what this app asked for");
                 }
                 Ok(())

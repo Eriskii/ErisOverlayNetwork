@@ -1,0 +1,19 @@
+[package]
+name = "eon-android"
+version = "0.3.0"
+edition = "2024"
+description = "ErisOverlayNetwork's daemon as a JNI library for the Android app"
+license = "MIT"
+
+[lib]
+name = "eon_android"
+crate-type = ["cdylib"]
+
+[dependencies]
+eon = { path = "../eon" }
+erisoverlaynetwork = { path = ".." }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"

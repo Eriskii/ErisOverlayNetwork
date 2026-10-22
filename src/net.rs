@@ -36,6 +36,16 @@ impl Network {
     }
 }
 
+impl Network {
+    /// The one relay a relay-only network reaches others through.
+    pub fn relay(&self) -> Option<iroh::RelayUrl> {
+        match self {
+            Network::Relay(url) => Some(url.clone()),
+            Network::Internet | Network::Loopback => None,
+        }
+    }
+}
+
 impl std::str::FromStr for Network {
     type Err = Error;
 

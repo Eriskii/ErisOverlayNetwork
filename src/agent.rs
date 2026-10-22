@@ -1,16 +1,17 @@
-//! Asking the device's ErisAuth to approve an app.
+//! Asking the device's ErisOverlayNetwork to approve an app.
 //!
-//! ErisAuth listens on `erisauth/agent.sock` in the session's runtime directory:
-//! `$XDG_RUNTIME_DIR`, or on macOS `$TMPDIR`. An app connects and sends one
-//! line: approve me, by this key, for this service, with these grants. ErisAuth puts the
-//! request to the person, with the program the kernel says is asking, and answers with the
-//! app's [note](crate::note) and a [snapshot](crate::directory::Snapshot) of the mesh, or a
-//! denial. Closing the connection withdraws the request.
+//! ErisOverlayNetwork listens on `eon/agent.sock` in the session's runtime directory:
+//! `$XDG_RUNTIME_DIR`, or on macOS `$TMPDIR`. An app connects and sends one line: approve me, by
+//! this key, to use these [capabilities](crate::capability) with these grants and to serve
+//! those. ErisOverlayNetwork puts the request to the person, with the program the kernel says is
+//! asking, and answers with the app's [note](crate::note) and a
+//! [snapshot](crate::directory::Snapshot) of the mesh, or a denial. Closing the connection
+//! withdraws the request.
 //!
 //! ```text
-//! app   → {"v":2,"op":"approve","service":"files","name":"ErisFiles","grants":["files:read"],"serves":true,"app":"…"}
+//! app   → {"v":3,"op":"approve","name":"ErisFiles","uses":{"files/1":["files:read"]},"serves":[{"capability":"files/1"}],"app":"…"}
 //! agent → {"approved":{"note":{…},"snapshot":{…}}}     or  {"denied":"why"}
-//! app   → {"v":2,"op":"snapshot"}
+//! app   → {"v":3,"op":"snapshot"}
 //! agent → {"snapshot":{…}}
 //! ```
 //!
@@ -23,12 +24,13 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
+use crate::capability::{Serves, Uses};
 use crate::directory::Snapshot;
 use crate::error::{Error, Result};
 use crate::note::Note;
 
 /// The protocol version an app sends.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 /// The longest line either side reads.
 pub const MAX_LINE: u64 = 4 * 1024 * 1024;
@@ -36,14 +38,14 @@ pub const MAX_LINE: u64 = 4 * 1024 * 1024;
 /// What an app asks to be approved for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ask {
-    pub service: String,
     /// The app's name for itself. Shown to the person, trusted for nothing.
     pub name: String,
+    /// What it uses, with the grants it asks for in each.
     #[serde(default)]
-    pub grants: Vec<String>,
-    /// Whether it serves the service to other apps.
+    pub uses: Uses,
+    /// What it serves.
     #[serde(default)]
-    pub serves: bool,
+    pub serves: Vec<Serves>,
     /// The key the app holds: the note will name it, and only its holder can use the note.
     pub app: iroh::EndpointId,
 }
@@ -81,7 +83,7 @@ pub enum Answer {
 
 /// Where the agent listens under a runtime directory.
 pub fn socket_in(runtime_dir: &Path) -> PathBuf {
-    runtime_dir.join("erisauth").join("agent.sock")
+    runtime_dir.join("eon").join("agent.sock")
 }
 
 /// Where this user's agent listens, when the session has a runtime directory
@@ -118,15 +120,19 @@ pub struct Agent {
 
 impl Agent {
     /// Ask to be approved, and wait for the person's answer. The note is checked before it is
-    /// returned: it names this app's key and service and counts in the snapshot's mesh.
+    /// returned: it names this app's key, approves no more than was asked, and counts in the
+    /// snapshot's mesh. The person may have approved fewer grants than were asked for.
     pub async fn approve(&mut self, ask: &Ask) -> Result<Answer> {
         self.send(&Request::Approve { v: VERSION, ask: ask.clone() }).await?;
         match self.reply().await? {
             Reply::Approved { note, snapshot } => {
                 let list = snapshot.list()?;
                 note.check(&list)?;
-                if note.app() != ask.app || note.body.service != ask.service {
-                    return Err(Error::Unreachable("ErisAuth approved something other than what was asked".into()));
+                let within = crate::capability::within((&ask.uses, &ask.serves), (&note.body.uses, &note.body.serves));
+                if note.app() != ask.app || !within {
+                    return Err(Error::Unreachable(
+                        "ErisOverlayNetwork approved something other than what was asked".into(),
+                    ));
                 }
                 Ok(Answer::Approved { note, snapshot })
             }
@@ -155,15 +161,16 @@ impl Agent {
         let mut line = String::new();
         (&mut self.read).take(MAX_LINE).read_line(&mut line).await?;
         if line.is_empty() {
-            return Err(Error::Unreachable("ErisAuth hung up without answering".into()));
+            return Err(Error::Unreachable("ErisOverlayNetwork hung up without answering".into()));
         }
-        serde_json::from_str(&line).map_err(|e| Error::Unreachable(format!("ErisAuth sent something unreadable: {e}")))
+        serde_json::from_str(&line)
+            .map_err(|e| Error::Unreachable(format!("ErisOverlayNetwork sent something unreadable: {e}")))
     }
 }
 
 fn unexpected(reply: Reply) -> Error {
     match reply {
-        Reply::Error(why) => Error::Unreachable(format!("ErisAuth could not take the request: {why}")),
-        other => Error::Unreachable(format!("ErisAuth answered out of turn: {other:?}")),
+        Reply::Error(why) => Error::Unreachable(format!("ErisOverlayNetwork could not take the request: {why}")),
+        other => Error::Unreachable(format!("ErisOverlayNetwork answered out of turn: {other:?}")),
     }
 }
