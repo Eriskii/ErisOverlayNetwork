@@ -19,6 +19,7 @@ use iroh::protocol::Router;
 pub struct Device {
     pub name: String,
     pub node: Node,
+    pub network: Network,
     pub pairings: Arc<Pairings>,
     /// What is offered to this device while it shows a join ticket.
     pub offers: Arc<Offers>,
@@ -61,28 +62,21 @@ pub async fn device_on(name: &str, store: Arc<dyn mesh::Store>, network: &Networ
         .accept(ceremony::ALPN, PairService::new(pairings.clone(), move || shown.clone()))
         .accept(join::ALPN, JoinService::new(offers.clone(), adopt))
         .spawn();
-    Device { name: name.into(), node, pairings, offers, _router: router }
+    Device { name: name.into(), node, network: network.clone(), pairings, offers, _router: router }
 }
 
 /// A ticket `host` shows to let someone in, and its session.
 pub async fn ticket(host: &Device) -> (uuid::Uuid, Ticket) {
     let (id, code) = host.pairings.open(600);
-    let addr = net::advertised(host.node.endpoint(), &host_network(host)).await;
+    let addr = net::advertised(host.node.endpoint(), &host.network).await;
     (id, Ticket::new(code, host.node.id(), Some(host.name.clone())).unwrap().at(&addr))
 }
 
 /// The join ticket `newcomer` shows to be added.
 pub async fn join_ticket(newcomer: &Device) -> Ticket {
     let code = newcomer.offers.open(600);
-    let addr = net::advertised(newcomer.node.endpoint(), &host_network(newcomer)).await;
+    let addr = net::advertised(newcomer.node.endpoint(), &newcomer.network).await;
     Ticket::join(code, newcomer.node.id(), newcomer.name.clone()).unwrap().at(&addr)
-}
-
-fn host_network(device: &Device) -> Network {
-    match device.node.endpoint().addr().relay_urls().next() {
-        Some(url) => Network::Relay(url.clone()),
-        None => Network::Loopback,
-    }
 }
 
 /// `newcomer` joins `host`'s mesh the way a person does it: ticket, fingerprint, approval.
