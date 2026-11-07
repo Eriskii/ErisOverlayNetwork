@@ -92,7 +92,8 @@ person has typed it and the server has accepted. An app with no eon beside it, s
 browser, asks by ticket instead: **Add a browser app** on the page, or `eon add-app`.
 
 `eon apps` lists every approval this device issued; `eon revoke` revokes one, and it stops counting
-on every device and at every server at once.
+on every device and at every server at once. An app that asks again holds what the person approved
+this time: the approval before it stops counting, unless the person says no.
 
 ## The page
 

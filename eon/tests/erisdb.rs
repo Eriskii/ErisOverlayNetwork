@@ -340,6 +340,41 @@ async fn an_app_is_approved_for_the_database_with_a_tap_and_the_passphrase() {
     .expect("ErisDB kept serving a revoked app");
 }
 
+/// An app signing in again keeps working at ErisDB under what the person approved last, and one
+/// revocation ends it.
+#[tokio::test]
+async fn an_app_approved_again_is_cut_off_by_one_revocation() {
+    let (laptop, _phone, _db) = mesh().await;
+    let app = App::new();
+    let asking = app.asks(&laptop, &["tasks:read", "tasks:write"]);
+    let prompt = laptop.prompt().await;
+    let decided = laptop.say(json!({"op": "decide", "id": prompt["id"], "passphrase": PASSPHRASE})).await;
+    assert_eq!(decided, json!({"ok": true}));
+    let Answer::Approved { note: first, .. } = asking.await.unwrap().unwrap() else { panic!("not approved") };
+
+    let asking = app.asks(&laptop, &["tasks:read"]);
+    let prompt = laptop.prompt().await;
+    let decided = laptop.say(json!({"op": "decide", "id": prompt["id"], "passphrase": PASSPHRASE})).await;
+    assert_eq!(decided, json!({"ok": true}));
+    let Answer::Approved { note: second, snapshot } = asking.await.unwrap().unwrap() else { panic!("not approved") };
+    assert!(snapshot.list().unwrap().is_revoked(&first.id));
+    second.check(&snapshot.list().unwrap()).unwrap();
+
+    let (status, held) = app.permissions(&snapshot).await;
+    assert_eq!(status, 200, "losing its earlier approval does not cut it off: {held}");
+    assert_eq!(held["grants"], json!(["tasks:read"]), "it holds what the person approved last");
+
+    let revoked = laptop.command(&["revoke", "Tasks"]).output().await.unwrap();
+    assert!(revoked.status.success(), "{}", String::from_utf8_lossy(&revoked.stderr));
+    tokio::time::timeout(PATIENCE, async {
+        while app.permissions(&snapshot).await.0 == 200 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("ErisDB kept serving a revoked app");
+}
+
 #[tokio::test]
 async fn wrong_guesses_lock_a_device_out_and_not_another() {
     let (laptop, phone, db) = mesh().await;

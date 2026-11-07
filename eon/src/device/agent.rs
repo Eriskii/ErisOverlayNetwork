@@ -494,6 +494,14 @@ impl Daemon {
                 self.node.append(Op::Revoke { note: other.id }).await.map_err(|e| failed("refused", e.to_string()))?;
             }
         }
+        // The same app asking again holds what the person approved this time and nothing from
+        // before: the approvals it held stop counting, whichever device gave them, as far as
+        // this device has heard.
+        let heard = self.node.directory().into_iter().filter_map(|p| p.note().cloned());
+        let held = self.issued().into_iter().chain(heard).filter(|n| n.app() == note.app() && n.id != note.id);
+        for before in held.filter(|n| self.node.counts(n)) {
+            self.node.append(Op::Revoke { note: before.id }).await.map_err(|e| failed("refused", e.to_string()))?;
+        }
         let snapshot = self.node.snapshot().await.ok_or_else(|| failed("internal", "the mesh went away"))?;
         Ok(Approved::App { note, snapshot })
     }

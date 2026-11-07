@@ -8,8 +8,9 @@ use std::time::Duration;
 use erisoverlaynetwork::agent::{self, Answer, Ask};
 use erisoverlaynetwork::ceremony::{self, Approval};
 use erisoverlaynetwork::net::{self, Network};
+use erisoverlaynetwork::note::NoteBody;
 use erisoverlaynetwork::ticket::Ticket;
-use erisoverlaynetwork::{Serves, Uses};
+use erisoverlaynetwork::{Note, Serves, Uses};
 use iroh::SecretKey;
 use serde_json::{Value, json};
 use support::{Device, PATIENCE};
@@ -89,6 +90,117 @@ async fn an_app_is_approved_with_one_tap() {
     laptop.say(json!({"op": "decide", "id": prompt["id"]})).await;
     let Answer::Approved { note, .. } = asking.await.unwrap().unwrap() else { panic!("not approved") };
     assert_eq!(note.body.uses, uses("files/1", &["files:read", "files:write"]), "approved as asked");
+}
+
+/// An app asking again is the same app, holding what the person approved this time: the approval
+/// before it stops counting, unless the person says no.
+#[tokio::test]
+async fn an_app_asking_again_holds_only_what_it_was_last_approved_for() {
+    let laptop = Device::founder("laptop").await;
+    let key = SecretKey::generate();
+    let asking = ask(&laptop, files(&key));
+    let prompt = laptop.prompt().await;
+    assert_eq!(laptop.say(json!({"op": "decide", "id": prompt["id"]})).await, json!({"ok": true}));
+    let Answer::Approved { note: first, .. } = asking.await.unwrap().unwrap() else { panic!("not approved") };
+
+    let asking = ask(&laptop, files(&key));
+    let prompt = laptop.prompt().await;
+    assert_eq!(laptop.say(json!({"op": "deny", "id": prompt["id"]})).await, json!({"ok": true}));
+    assert!(matches!(asking.await.unwrap().unwrap(), Answer::Denied(_)));
+    let state = laptop.state().await;
+    assert_eq!(note_listed(&state, &first.id.to_string())["revoked"], false, "turned down, it keeps what it had");
+
+    let asking = ask(&laptop, files(&key));
+    let prompt = laptop.prompt().await;
+    let decided = laptop.say(json!({"op": "decide", "id": prompt["id"], "grants": {"files/1": ["files:read"]}})).await;
+    assert_eq!(decided, json!({"ok": true}));
+    let Answer::Approved { note: second, snapshot } = asking.await.unwrap().unwrap() else { panic!("not approved") };
+
+    let list = snapshot.list().unwrap();
+    assert!(first.check(&list).is_err(), "the approval before it stopped counting");
+    second.check(&list).expect("the approval the person just gave counts");
+    let state = laptop.state().await;
+    assert_eq!(note_listed(&state, &first.id.to_string())["revoked"], true);
+    assert_eq!(note_listed(&state, &second.id.to_string())["revoked"], false);
+
+    // So its name answers to one approval, and revoking it leaves nothing behind.
+    let revoked = laptop.command(&["revoke", "ErisFiles"]).output().await.unwrap();
+    assert!(revoked.status.success(), "{}", String::from_utf8_lossy(&revoked.stderr));
+    let state = laptop.state().await;
+    assert_eq!(note_listed(&state, &second.id.to_string())["revoked"], true);
+}
+
+/// Approved again on another device, an app holds that approval alone, once that device has heard
+/// of the one before.
+#[tokio::test]
+async fn an_app_approved_again_on_another_device_holds_only_that_approval() {
+    let laptop = Device::founder("laptop").await;
+    let phone = Device::start().await;
+    phone.join_through(&laptop, "phone").await;
+    let key = SecretKey::generate();
+    let asking = ask(&laptop, files(&key));
+    let prompt = laptop.prompt().await;
+    assert_eq!(laptop.say(json!({"op": "decide", "id": prompt["id"]})).await, json!({"ok": true}));
+    let Answer::Approved { note: first, snapshot } = asking.await.unwrap().unwrap() else { panic!("not approved") };
+    let _app = serving(&key, &first, snapshot).await;
+    phone.until("the phone hears of the app", |s| server(s, "files/1")["app"] == key.public().to_string()).await;
+
+    let asking = ask(&phone, files(&key));
+    let prompt = phone.prompt().await;
+    assert_eq!(phone.say(json!({"op": "decide", "id": prompt["id"]})).await, json!({"ok": true}));
+    let Answer::Approved { note: second, snapshot } = asking.await.unwrap().unwrap() else { panic!("not approved") };
+    let list = snapshot.list().unwrap();
+    assert!(list.is_revoked(&first.id), "the laptop's approval stopped counting");
+    second.check(&list).unwrap();
+}
+
+/// An app may hold two approvals from one device, from before asking again replaced the one before:
+/// `key`'s second is written beside its first, as that eon left it. Returns both.
+async fn holding_two(device: &mut Device, key: &SecretKey) -> (Note, Note) {
+    let asking = ask(device, files(key));
+    let prompt = device.prompt().await;
+    assert_eq!(device.say(json!({"op": "decide", "id": prompt["id"]})).await, json!({"ok": true}));
+    let Answer::Approved { note: first, .. } = asking.await.unwrap().unwrap() else { panic!("not approved") };
+
+    device.stop().await;
+    let home = device.data.path().join("eon");
+    let signer: [u8; 32] = std::fs::read(home.join("key")).unwrap().try_into().unwrap();
+    let body = NoteBody { at: first.body.at + 1, ..first.body.clone() };
+    let second = Note::issue(&SecretKey::from_bytes(&signer), body).unwrap();
+    let mut issued: Vec<Note> = serde_json::from_slice(&std::fs::read(home.join("notes.json")).unwrap()).unwrap();
+    issued.push(second.clone());
+    std::fs::write(home.join("notes.json"), serde_json::to_vec_pretty(&issued).unwrap()).unwrap();
+    device.serve().await;
+    (first, second)
+}
+
+#[tokio::test]
+async fn revoking_an_app_ends_every_approval_this_device_gave_it() {
+    let mut laptop = Device::founder("laptop").await;
+    let revoked = |state: &Value, note: &Note| note_listed(state, &note.id.to_string())["revoked"] == true;
+
+    // By the older approval's id: the one that used to leave the app holding the newer.
+    let (older, newer) = holding_two(&mut laptop, &SecretKey::generate()).await;
+    assert_eq!(laptop.say(json!({"op": "revoke", "note": older.id.to_string()})).await, json!({"ok": true}));
+    let state = laptop.state().await;
+    assert!(revoked(&state, &older) && revoked(&state, &newer), "{state:#}");
+
+    // By its name: one app is one answer, however many approvals it holds.
+    let (older, newer) = holding_two(&mut laptop, &SecretKey::generate()).await;
+    let output = laptop.command(&["revoke", "ErisFiles"]).output().await.unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let state = laptop.state().await;
+    assert!(revoked(&state, &older) && revoked(&state, &newer), "{state:#}");
+
+    // Two apps of one name are not one answer.
+    let (_, _) = holding_two(&mut laptop, &SecretKey::generate()).await;
+    let asking = ask(&laptop, files(&SecretKey::generate()));
+    let prompt = laptop.prompt().await;
+    assert_eq!(laptop.say(json!({"op": "decide", "id": prompt["id"]})).await, json!({"ok": true}));
+    asking.await.unwrap().unwrap();
+    let output = laptop.command(&["revoke", "ErisFiles"]).output().await.unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("more than one app"));
 }
 
 #[tokio::test]

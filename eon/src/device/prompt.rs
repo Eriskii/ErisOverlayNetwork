@@ -515,9 +515,10 @@ pub async fn revoke(paths: &Paths, which: &str) -> Result<()> {
         named
     };
     let note = match matches.as_slice() {
-        [one] => one,
         [] => bail!("no approval of this device's is called {which:?} or has a note id starting so"),
-        _ => bail!("more than one approval answers to {which:?}; give the start of its note id"),
+        // One app is one answer, however many approvals it holds: revoking one revokes them all.
+        [first, rest @ ..] if rest.iter().all(|n| n["app"] == first["app"]) => first,
+        _ => bail!("more than one app answers to {which:?}; give the start of its note id"),
     };
     say(paths, json!({"op": "revoke", "note": note["id"]})).await?;
     println!("{} is revoked, everywhere.", text(&note["name"]));

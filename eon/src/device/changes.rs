@@ -194,16 +194,22 @@ impl Daemon {
         }
     }
 
-    /// Revoke an app's note: it stops counting everywhere.
+    /// Revoke an app's note: it stops counting everywhere, and so does any other this device gave
+    /// the same app before asking again replaced them, so that revoking an app leaves it none.
     pub async fn revoke(&self, note: &str) -> Value {
         let note: NoteId = match note.parse() {
             Ok(note) => note,
             Err(e) => return refused(&e),
         };
-        match self.node.append(Op::Revoke { note }).await {
-            Ok(_) => ok(),
-            Err(e) => refused(&e),
+        let issued = self.issued();
+        let app = issued.iter().find(|n| n.id == note).map(|n| n.app());
+        let others = issued.iter().filter(|n| n.id != note && Some(n.app()) == app && self.node.counts(n));
+        for note in std::iter::once(note).chain(others.map(|n| n.id)) {
+            if let Err(e) = self.node.append(Op::Revoke { note }).await {
+                return refused(&e);
+            }
         }
+        ok()
     }
 
     /// The mesh's devices as the person's screens list them.
