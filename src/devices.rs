@@ -272,7 +272,7 @@ impl DeviceList {
     pub fn append(&mut self, key: &SecretKey, op: Op) -> Result<Signed> {
         let author = key.public();
         if !self.is_member(&author) {
-            return Err(Error::Forbidden { permission: "a member device".into() });
+            return Err(Error::Conflict("this device is not in the mesh".into()));
         }
         match &op {
             Op::Genesis { .. } => return Err(Error::BadRequest("a mesh has one genesis".into())),

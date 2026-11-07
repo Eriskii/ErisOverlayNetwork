@@ -400,6 +400,9 @@ fn device<'a>(state: &'a Value, which: &str) -> Result<&'a Value> {
 pub async fn devices(paths: &Paths) -> Result<()> {
     let state = state(paths).await?;
     let devices = state["mesh"]["devices"].as_array().context("this device is in no mesh")?;
+    if state["mesh"]["member"] == false {
+        println!("This device was removed from its mesh. These are the devices it last knew of:");
+    }
     for device in devices {
         let this = if device["this"] == true { " (this device)" } else { "" };
         let added = match device["added_by_name"].as_str() {

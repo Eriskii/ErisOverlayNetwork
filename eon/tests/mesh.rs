@@ -179,6 +179,10 @@ async fn removing_a_device_offers_the_devices_it_added() {
     for gone in [&phone, &tablet] {
         gone.until("a removed device hears it was removed", |s| s["mesh"]["member"] == false).await;
     }
+    let refused = phone.say(json!({"op": "rename", "device": watch_id, "name": "mine"})).await;
+    assert_eq!(refused["message"], "conflict: this device is not in the mesh", "{refused}");
+    let listed = phone.command(&["devices"]).output().await.unwrap();
+    assert!(String::from_utf8_lossy(&listed.stdout).starts_with("This device was removed from its mesh."));
     let state =
         laptop.until("the laptop hears of it", |s| events(s).contains(&"desktop removed phone, tablet".into())).await;
     assert!(events(&state).contains(&"phone added watch".into()), "{state}");
